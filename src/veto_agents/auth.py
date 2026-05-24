@@ -77,9 +77,10 @@ def open_inbox_for(email: str) -> str | None:
 def generate_device_code() -> str:
     """A URL-safe random string within the server's accepted range (8–64 chars).
 
-    32 bytes of entropy → ~43 base64url characters, comfortably within range.
+    Prefixed `dc_` so device codes are recognizable in logs (matches the
+    convention used by the npm `@veto-protocol/cli` package).
     """
-    return secrets.token_urlsafe(32)
+    return "dc_" + secrets.token_urlsafe(24)
 
 
 @dataclass
@@ -146,7 +147,7 @@ def poll_until_ready(
     api_base: str,
     device_code: str,
     interval_s: float = 2.0,
-    timeout_s: float = 600.0,
+    timeout_s: float = 900.0,  # 15 min, matches MagicLinkToken.TOKEN_TTL server-side
     on_tick=None,
 ) -> PollReady:
     """Block until the user clicks the link, or raise after timeout_s.

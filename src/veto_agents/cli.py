@@ -117,7 +117,7 @@ def setup() -> None:
         console.print(
             f"  [green]✓[/green] Magic link sent to [cyan]{email}[/cyan].\n"
             "  Opening your inbox in a browser now — click the link to finish signing in.\n"
-            "  [dim](Waiting up to 10 minutes. Press Ctrl-C to abort.)[/dim]\n"
+            "  [dim](Waiting up to 15 minutes. Press Ctrl-C to abort.)[/dim]\n"
         )
         inbox_url = auth.open_inbox_for(email)
         if inbox_url:
