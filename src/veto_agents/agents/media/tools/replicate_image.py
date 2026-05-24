@@ -16,12 +16,13 @@ Polling: Replicate predictions are async — we poll up to 60s for completion.
 
 from __future__ import annotations
 
-import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
 
 import httpx
+
+from ....credentials import get as get_credential
 
 
 REPLICATE_API = "https://api.replicate.com/v1"
@@ -71,15 +72,16 @@ def generate(
 ) -> ToolResult:
     """Generate an image. Blocking — returns once the file is written to disk
     (or an error / timeout is reached)."""
-    token = os.environ.get("REPLICATE_API_TOKEN")
+    token = get_credential("REPLICATE_API_TOKEN")
     if not token:
         return ToolResult(
             ok=False,
             actual_cost_usd=0.0,
             error=(
-                "REPLICATE_API_TOKEN not set. Get one at "
-                "https://replicate.com/account/api-tokens, then "
-                "`export REPLICATE_API_TOKEN=r8_…`"
+                "REPLICATE_API_TOKEN not set. Run `veto-agents install media` "
+                "to walk through the setup, or `veto-agents creds set "
+                "REPLICATE_API_TOKEN <r8_…>` to save one manually. Get a token "
+                "at https://replicate.com/account/api-tokens."
             ),
         )
 

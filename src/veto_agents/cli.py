@@ -30,7 +30,7 @@ from rich.console import Console
 from rich.prompt import Confirm, Prompt
 from rich.table import Table
 
-from . import __version__, config as cfg_module, registry as registry_module
+from . import __version__, config as cfg_module, credentials as creds_module, registry as registry_module
 from . import auth
 from .funding import get_funding_target, render_funding_qr
 from .register import is_valid_evm_address
@@ -67,7 +67,31 @@ def _root(
         console.print(f"veto-agents {__version__}")
         raise typer.Exit(0)
     if ctx.invoked_subcommand is None:
-        # No subcommand → show help.
+        cfg = cfg_module.load()
+        # First run? Auto-launch setup so the user has a path forward.
+        if not cfg.api_key:
+            console.print(
+                "\n[bold cyan]Welcome to Veto Agents.[/bold cyan]  "
+                "[dim]AI agents that pay for things, with the safety built in.[/dim]\n"
+            )
+            console.print("Looks like this is your first run. Let's get you set up.\n")
+            ctx.invoke(setup)
+            console.print(
+                "\n[bold]Now install your first agent:[/bold]\n"
+                "  [cyan]veto-agents install media[/cyan]       generates images + video + voice\n"
+                "  [cyan]veto-agents install build[/cyan]       deploys your code on cheap infra\n"
+                "  [cyan]veto-agents install research[/cyan]    deep research with paid sources\n"
+                "  [cyan]veto-agents install inbox[/cyan]       email triage + scheduling\n"
+            )
+            return
+        # Signed in: show a brief status + help.
+        masked = (cfg.api_key[:12] + "…" + cfg.api_key[-4:]) if cfg.api_key else "—"
+        installed = ", ".join(cfg.installed_agents) if cfg.installed_agents else "[dim]none yet[/dim]"
+        console.print(
+            f"\n[bold]veto-agents[/bold] {__version__} · signed in · "
+            f"agents installed: {installed}\n"
+            f"[dim]api_key={masked}  state={cfg_module.state_dir()}[/dim]\n"
+        )
         console.print(ctx.get_help())
 
 
@@ -235,8 +259,17 @@ def list_cmd() -> None:
 
 
 @app.command()
-def install(name: str = typer.Argument(..., help="Agent name (e.g. 'media').")) -> None:
-    """Install an agent. Copies its default policy to ~/.veto-agents/policies/."""
+def install(
+    name: str = typer.Argument(..., help="Agent name (e.g. 'media')."),
+    skip_creds: bool = typer.Option(
+        False, "--skip-creds", help="Skip the credential walkthrough (configure later)."
+    ),
+) -> None:
+    """Install an agent: copies policy, walks you through its tool credentials.
+
+    Reuses your existing wallet, email, and policy posture — no re-prompting
+    for stuff you already did during `setup`.
+    """
     entry = registry_module.get(name)
     if entry is None:
         console.print(f"[red]✗[/red] Unknown agent: {name}")
@@ -244,26 +277,172 @@ def install(name: str = typer.Argument(..., help="Agent name (e.g. 'media').")) 
         raise typer.Exit(1)
 
     cfg = cfg_module.load()
-    if name in cfg.installed_agents:
-        console.print(f"[yellow]·[/yellow] {name} is already installed.")
-        return
 
-    # Copy default policy from the package into the user's policies dir.
-    pkg_policy = _bundled_policy_path(name)
-    user_policy = cfg_module.policies_dir() / f"{name}.yaml"
-    if pkg_policy.exists():
-        user_policy.write_text(pkg_policy.read_text())
-        console.print(f"[green]✓[/green] Policy installed → {user_policy}")
-    else:
-        console.print(f"[yellow]·[/yellow] No bundled policy for {name} yet (placeholder).")
+    # ── Guardrail: must be signed in first ────────────────────
+    if not cfg.api_key:
+        console.print(
+            "[yellow]·[/yellow] You haven't signed in yet. Running setup first.\n"
+        )
+        setup()
+        cfg = cfg_module.load()
+        if not cfg.api_key:
+            # Setup didn't complete (network error, ctrl-c, etc.). Don't proceed.
+            console.print(
+                "[red]✗[/red] Couldn't complete setup. Re-run [cyan]veto-agents setup[/cyan] when ready."
+            )
+            raise typer.Exit(1)
+        console.print()
 
-    cfg.installed_agents.append(name)
-    cfg_module.save(cfg)
+    already_installed = name in cfg.installed_agents
+    if already_installed:
+        console.print(
+            f"[yellow]·[/yellow] [bold]{name}[/bold] is already installed. "
+            f"Re-running credential walkthrough.\n"
+        )
 
+    # ── Welcome + summary of what's about to happen ───────────
+    console.print(f"\n[bold cyan]Installing {name}[/bold cyan] — {entry.one_line}")
+    console.print(f"  [dim]Will spend on: {entry.spends_on}[/dim]")
+    console.print(f"  [dim]Spec: {entry.spec_url}[/dim]")
+    if cfg.wallet_address:
+        console.print(
+            f"  [dim]Reusing your wallet:[/dim] [cyan]{cfg.wallet_address}[/cyan]"
+        )
+
+    # ── Policy file ───────────────────────────────────────────
+    if not already_installed:
+        pkg_policy = _bundled_policy_path(name)
+        user_policy = cfg_module.policies_dir() / f"{name}.yaml"
+        if pkg_policy and pkg_policy.is_file():
+            user_policy.write_text(pkg_policy.read_text())
+            console.print(f"\n[green]✓[/green] Policy installed → [dim]{user_policy}[/dim]")
+        else:
+            console.print(f"\n[yellow]·[/yellow] No bundled policy for {name} (placeholder).")
+
+    # ── Credential walkthrough ────────────────────────────────
+    if entry.credentials and not skip_creds:
+        _walk_credentials(entry, console)
+    elif skip_creds and entry.credentials:
+        console.print(
+            f"\n[dim](Skipped credential walkthrough. Run "
+            f"[cyan]veto-agents creds set {name}[/cyan] to configure later.)[/dim]"
+        )
+
+    # ── Register install + suggest next step ─────────────────
+    if not already_installed:
+        cfg.installed_agents.append(name)
+        cfg_module.save(cfg)
+
+    example_prompt = {
+        "media":    "make an image of a neon jellyfish in cyberpunk rain",
+        "build":    "deploy this repo to the cheapest provider",
+        "research": "research the top 5 papers on agent governance in 2026",
+        "inbox":    "triage my inbox from this week",
+    }.get(name, "<your prompt>")
     console.print(
-        f"[green]✓[/green] Installed [bold]{name}[/bold]. "
-        f"Try: [cyan]veto-agents {name} \"<your prompt>\"[/cyan]\n"
+        f"\n[green]✓[/green] [bold]{name}[/bold] ready. Try:\n"
+        f"  [cyan]veto-agents {name} \"{example_prompt}\"[/cyan]\n"
     )
+
+
+def _walk_credentials(entry: "registry_module.AgentEntry", console: Console) -> None:
+    """Prompt the user through each credential the agent needs, opening
+    the signup URL in their browser as a soft nudge. Saves to credentials.yaml."""
+    existing = creds_module.load()
+    console.print(f"\n[bold]Tool credentials[/bold] — {entry.name} needs:\n")
+
+    for cred in entry.credentials:
+        current = existing.get(cred.env_var)
+        env_override = os.environ.get(cred.env_var)
+        required_tag = "[red]required[/red]" if cred.required else "[dim]optional[/dim]"
+
+        if env_override:
+            console.print(
+                f"  [green]✓[/green] [bold]{cred.env_var}[/bold] · "
+                f"already set in your shell env ({required_tag})"
+            )
+            continue
+        if current:
+            mask = current[:6] + "…" + current[-4:] if len(current) > 12 else "saved"
+            console.print(
+                f"  [green]✓[/green] [bold]{cred.env_var}[/bold] · saved ({mask}) ({required_tag})"
+            )
+            if not Confirm.ask("    Replace it?", default=False):
+                continue
+
+        console.print(f"\n  [bold]{cred.label}[/bold] ({required_tag})")
+        if cred.notes:
+            console.print(f"  [dim]{cred.notes}[/dim]")
+        console.print(f"  [dim]Get one at:[/dim] [cyan]{cred.signup_url}[/cyan]")
+
+        # Best-effort browser open. Silently no-op on headless systems.
+        try:
+            import webbrowser
+            webbrowser.open(cred.signup_url)
+        except Exception:
+            pass
+
+        if cred.required:
+            value = Prompt.ask("  Paste the value (or press Enter to skip)", default="", password=False)
+        else:
+            value = Prompt.ask("  Paste (or press Enter to skip)", default="", password=False)
+
+        value = value.strip()
+        if value:
+            creds_module.set_value(cred.env_var, value)
+            console.print(f"  [green]✓[/green] Saved to ~/.veto-agents/credentials.yaml")
+        elif cred.required:
+            console.print(
+                f"  [yellow]·[/yellow] Skipped. The {entry.name} agent will fail "
+                f"until this is set. Run install again or `veto-agents creds set {cred.env_var}` later."
+            )
+        else:
+            console.print("  [dim]Skipped (optional).[/dim]")
+
+
+# ── Credentials management subcommand ────────────────────────────────────
+
+creds_app = typer.Typer(help="Manage saved tool credentials (Replicate, Vercel, etc.).")
+app.add_typer(creds_app, name="creds")
+
+
+@creds_app.command("list")
+def creds_list() -> None:
+    """Show which credentials are saved (masked)."""
+    saved = creds_module.load()
+    if not saved:
+        console.print("[dim]No credentials saved yet. Install an agent to set them up.[/dim]")
+        return
+    console.print("\n[bold]Saved credentials[/bold]\n")
+    for env_var, val in sorted(saved.items()):
+        mask = val[:6] + "…" + val[-4:] if len(val) > 12 else "***"
+        env_override = " [dim](overridden by shell env)[/dim]" if os.environ.get(env_var) else ""
+        console.print(f"  [cyan]{env_var:<24}[/cyan]  {mask}{env_override}")
+    console.print()
+
+
+@creds_app.command("set")
+def creds_set(
+    env_var: str = typer.Argument(..., help="The env var name, e.g. REPLICATE_API_TOKEN"),
+    value: str = typer.Argument(None, help="The value (omit to be prompted)"),
+) -> None:
+    """Save or update a single credential."""
+    if value is None:
+        value = Prompt.ask(f"Value for {env_var}", password=False).strip()
+    if not value:
+        console.print("[yellow]·[/yellow] Empty value. Nothing saved.")
+        return
+    creds_module.set_value(env_var, value)
+    console.print(f"[green]✓[/green] Saved [bold]{env_var}[/bold].")
+
+
+@creds_app.command("remove")
+def creds_remove(env_var: str = typer.Argument(...)) -> None:
+    """Delete a saved credential."""
+    if creds_module.remove(env_var):
+        console.print(f"[green]✓[/green] Removed {env_var}.")
+    else:
+        console.print(f"[yellow]·[/yellow] {env_var} wasn't saved.")
 
 
 @app.command()
