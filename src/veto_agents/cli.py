@@ -336,21 +336,152 @@ def policy_show(name: str = typer.Argument(...)) -> None:
 # ─── wallet ──────────────────────────────────────────────────────────────
 
 
+@wallet_app.callback(invoke_without_command=True)
+def wallet_default(ctx: typer.Context) -> None:
+    """Show the full wallet dashboard: balance + per-agent stats + recent activity."""
+    if ctx.invoked_subcommand is not None:
+        return
+    _render_wallet_dashboard()
+
+
 @wallet_app.command("balance")
 def wallet_balance() -> None:
-    """Show wallet USDC balance on Base."""
+    """Just the USDC balance line."""
     cfg = cfg_module.load()
-    if not cfg.wallet_address:
-        console.print("[yellow]·[/yellow] No wallet configured. Run [cyan]veto-agents setup[/cyan].")
-        return
-    console.print(f"Wallet: [green]{cfg.wallet_address}[/green]")
-    console.print("[dim](on-chain balance lookup lands in v0.0.2)[/dim]")
+    target = get_funding_target(cfg.wallet_address or "")
+    try:
+        from .wallet_view import fmt_usdc, get_usdc_balance
+        raw = get_usdc_balance(target.address)
+        bal = fmt_usdc(raw)
+        console.print(f"[bold]${bal:,.2f}[/bold] USDC · treasury [cyan]{target.address}[/cyan] · {target.chain}")
+    except Exception as e:
+        console.print(f"[red]✗[/red] Couldn't read balance: {e}")
+
+
+@wallet_app.command("receive")
+def wallet_receive() -> None:
+    """Re-display the funding QR + address."""
+    cfg = cfg_module.load()
+    target = get_funding_target(cfg.wallet_address or "")
+    console.print(f"\nSend USDC on [bold cyan]{target.chain}[/bold cyan] to:\n")
+    console.print(render_funding_qr(target))
+    console.print(f"  Address: [cyan]{target.address}[/cyan]")
+    console.print(f"  Chain:   {target.chain} (chain id {target.chain_id})")
+    console.print(f"  Token:   USDC ({target.token_contract})\n")
 
 
 @wallet_app.command("topup")
 def wallet_topup() -> None:
-    """Top up the embedded wallet via Coinbase onramp."""
-    console.print("[dim](onramp link generation lands in v0.0.2)[/dim]")
+    """Top up the treasury via Coinbase onramp."""
+    console.print("[dim](onramp link generation lands in v0.0.4)[/dim]")
+
+
+def _render_wallet_dashboard() -> None:
+    """The headline `veto-agents wallet` view — balance + per-agent + recent."""
+    cfg = cfg_module.load()
+    if not cfg.api_key:
+        console.print(
+            "[yellow]·[/yellow] Not signed in. Run [cyan]veto-agents setup[/cyan] first."
+        )
+        return
+
+    from .wallet_view import (
+        aggregate_receipts,
+        fetch_receipts_summary,
+        fmt_usdc,
+        get_usdc_balance,
+    )
+
+    target = get_funding_target(cfg.wallet_address or "")
+
+    # ── Header ────────────────────────────────────────────────
+    console.print()
+    console.print(
+        f"[bold]Treasury[/bold] · [cyan]{target.address}[/cyan] · {target.chain}"
+    )
+    console.print("━" * 60)
+
+    # ── Balance ───────────────────────────────────────────────
+    try:
+        raw = get_usdc_balance(target.address)
+        bal_usd = fmt_usdc(raw)
+        console.print(f"USDC balance:              [bold]${bal_usd:,.2f}[/bold]")
+    except Exception as e:
+        console.print(f"USDC balance:              [red]error[/red] [dim]({e})[/dim]")
+
+    # ── Receipts feed (server-side data) ─────────────────────
+    try:
+        feed = fetch_receipts_summary(
+            api_base=cfg.veto_api_base,
+            api_key=cfg.api_key,
+            client_id=cfg.client_id,
+        )
+        rows = feed.get("results") or feed.get("receipts") or feed if isinstance(feed, list) else []
+        if isinstance(feed, dict) and "results" in feed:
+            rows = feed["results"]
+        elif isinstance(feed, list):
+            rows = feed
+    except Exception as e:
+        console.print(f"\n[yellow]·[/yellow] Couldn't fetch receipts: {e}")
+        console.print(
+            "[dim]The wallet dashboard's per-agent view depends on /api/v1/receipts/. "
+            "If that endpoint isn't available, this is expected.[/dim]\n"
+        )
+        return
+
+    import time as _time
+    lifetime, pending, per_agent, recent = aggregate_receipts(rows, now_epoch=_time.time())
+
+    console.print(f"Total spent (lifetime):    [bold]${lifetime:,.2f}[/bold]")
+    if pending > 0:
+        console.print(f"Pending (escalated):       [yellow]${pending:,.2f}[/yellow]")
+    else:
+        console.print("Pending (escalated):       $0.00")
+
+    # ── Per-agent ─────────────────────────────────────────────
+    if per_agent:
+        console.print("\n[bold]Per-agent spend[/bold]")
+        console.print("━" * 60)
+        agent_table = Table(show_header=False, box=None, pad_edge=False)
+        agent_table.add_column("agent", style="cyan", no_wrap=True)
+        agent_table.add_column("spent", justify="right", style="bold")
+        agent_table.add_column("actions", justify="right", style="dim")
+        agent_table.add_column("denied", justify="right", style="red")
+        agent_table.add_column("escalated", justify="right", style="yellow")
+        for stats in sorted(per_agent.values(), key=lambda s: s.spent_usd, reverse=True):
+            agent_table.add_row(
+                stats.name,
+                f"${stats.spent_usd:,.2f}",
+                f"{stats.actions} actions",
+                f"{stats.denied} denied" if stats.denied else "—",
+                f"{stats.escalated} escalated" if stats.escalated else "—",
+            )
+        console.print(agent_table)
+
+    # ── Recent activity ──────────────────────────────────────
+    if recent:
+        console.print("\n[bold]Recent activity[/bold]")
+        console.print("━" * 60)
+        for r in recent[:10]:
+            verdict_color = {
+                "allow": "green",
+                "deny": "red",
+                "escalate": "yellow",
+            }.get(r.verdict, "dim")
+            verdict_mark = {
+                "allow": "✓",
+                "deny": "✗",
+                "escalate": "?",
+            }.get(r.verdict, "·")
+            url_hint = f"  [dim]{r.receipt_url}[/dim]" if r.receipt_url else ""
+            amount_str = (
+                f"${r.amount_usd:,.2f}" if r.amount_usd > 0 else "[dim]$0.00[/dim]"
+            )
+            console.print(
+                f"  [dim]{r.when:<10}[/dim]  [{verdict_color}]{verdict_mark}[/{verdict_color}] "
+                f"[cyan]{r.agent:<10}[/cyan] {r.label[:36]:<36}  {amount_str}{url_hint}"
+            )
+    console.print()
 
 
 # ─── receipts ────────────────────────────────────────────────────────────
