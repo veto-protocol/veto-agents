@@ -401,42 +401,43 @@ def _render_wallet_dashboard() -> None:
     )
     console.print("━" * 60)
 
-    # ── Balance ───────────────────────────────────────────────
-    try:
-        raw = get_usdc_balance(target.address)
-        bal_usd = fmt_usdc(raw)
-        console.print(f"USDC balance:              [bold]${bal_usd:,.2f}[/bold]")
-    except Exception as e:
-        console.print(f"USDC balance:              [red]error[/red] [dim]({e})[/dim]")
+    # ── Balance + accounting ─────────────────────────────────
+    import time as _time
 
-    # ── Receipts feed (server-side data) ─────────────────────
+    from .wallet_view import compute_stats
+
     try:
-        feed = fetch_receipts_summary(
+        stats = compute_stats(
+            treasury=target.address,
+            chain=target.chain,
             api_base=cfg.veto_api_base,
             api_key=cfg.api_key,
             client_id=cfg.client_id,
+            now_epoch=_time.time(),
         )
-        rows = feed.get("results") or feed.get("receipts") or feed if isinstance(feed, list) else []
-        if isinstance(feed, dict) and "results" in feed:
-            rows = feed["results"]
-        elif isinstance(feed, list):
-            rows = feed
     except Exception as e:
-        console.print(f"\n[yellow]·[/yellow] Couldn't fetch receipts: {e}")
-        console.print(
-            "[dim]The wallet dashboard's per-agent view depends on /api/v1/receipts/. "
-            "If that endpoint isn't available, this is expected.[/dim]\n"
-        )
+        console.print(f"[red]✗[/red] Couldn't load wallet stats: {e}\n")
         return
 
-    import time as _time
-    lifetime, pending, per_agent, recent = aggregate_receipts(rows, now_epoch=_time.time())
+    console.print(f"On-chain USDC:             [bold]${stats.usdc_balance_usd:,.2f}[/bold]")
+    console.print(
+        f"Used (off-chain ledger):   [dim]${stats.lifetime_spent_usd:,.4f}[/dim]"
+    )
+    if stats.pending_escalated_usd > 0:
+        console.print(
+            f"Pending (escalated):       [yellow]${stats.pending_escalated_usd:,.4f}[/yellow]"
+        )
+    available_color = "green" if stats.available_usd > 0.10 else "yellow" if stats.available_usd > 0 else "red"
+    console.print(
+        f"Available to spend:        [bold {available_color}]${stats.available_usd:,.4f}[/bold {available_color}]"
+    )
+    if stats.lifetime_spent_usd > 0:
+        console.print(
+            "[dim](Settlement of off-chain spend → on-chain VGA debit lands in v0.0.5.)[/dim]"
+        )
 
-    console.print(f"Total spent (lifetime):    [bold]${lifetime:,.2f}[/bold]")
-    if pending > 0:
-        console.print(f"Pending (escalated):       [yellow]${pending:,.2f}[/yellow]")
-    else:
-        console.print("Pending (escalated):       $0.00")
+    per_agent = stats.per_agent
+    recent = stats.recent
 
     # ── Per-agent ─────────────────────────────────────────────
     if per_agent:

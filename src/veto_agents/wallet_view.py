@@ -42,6 +42,56 @@ class WalletStats:
     per_agent: dict[str, "AgentStats"]
     recent: list["ReceiptSummary"]
 
+    @property
+    def available_usd(self) -> float:
+        """On-chain balance minus what's been spent off-chain (per receipts)
+        and what's pending in escalations. v0.0.4 settlement will reconcile
+        the off-chain spent total back to chain; until then this is the
+        truth of how much the agent can still spend."""
+        return max(0.0, self.usdc_balance_usd - self.lifetime_spent_usd - self.pending_escalated_usd)
+
+
+def compute_stats(
+    *,
+    treasury: str,
+    chain: str,
+    api_base: str,
+    api_key: str,
+    client_id: str | None,
+    rpc_url: str = DEFAULT_RPC,
+    now_epoch: float,
+) -> WalletStats:
+    """One-stop fetch + aggregate. Used by the CLI wallet dashboard and the
+    pre-flight balance check in the agent runners."""
+    try:
+        raw = get_usdc_balance(treasury, rpc_url=rpc_url)
+        bal_usd = fmt_usdc(raw)
+    except Exception:
+        raw = 0
+        bal_usd = 0.0
+
+    rows: list[dict[str, Any]] = []
+    try:
+        feed = fetch_receipts_summary(api_base=api_base, api_key=api_key, client_id=client_id)
+        if isinstance(feed, dict) and "results" in feed:
+            rows = feed["results"]
+        elif isinstance(feed, list):
+            rows = feed
+    except Exception:
+        rows = []  # degrade gracefully — dashboard handles empty
+
+    lifetime, pending, per_agent, recent = aggregate_receipts(rows, now_epoch=now_epoch)
+    return WalletStats(
+        treasury_address=treasury,
+        chain=chain,
+        usdc_balance_raw=raw,
+        usdc_balance_usd=bal_usd,
+        lifetime_spent_usd=lifetime,
+        pending_escalated_usd=pending,
+        per_agent=per_agent,
+        recent=recent,
+    )
+
 
 @dataclass
 class AgentStats:

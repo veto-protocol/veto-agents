@@ -115,6 +115,41 @@ def run(prompt: str, *, cfg, console: Console, auto_confirm: bool = False) -> No
     # 2. Render plan + estimate
     total = _render_plan(steps, console)
 
+    # 2.5. Pre-flight balance check — refuse if treasury can't cover the plan.
+    # Skip the on-chain check if we don't have credentials (covered by the
+    # later authorize call anyway).
+    if cfg.api_key and cfg.agent_id:
+        import time as _time
+
+        from ...funding import get_funding_target
+        from ...wallet_view import compute_stats
+
+        target = get_funding_target(cfg.wallet_address or "")
+        stats = compute_stats(
+            treasury=target.address,
+            chain=target.chain,
+            api_base=cfg.veto_api_base,
+            api_key=cfg.api_key,
+            client_id=cfg.client_id,
+            now_epoch=_time.time(),
+        )
+        if stats.available_usd < total:
+            console.print(
+                f"[red]✗ Insufficient credit.[/red] Treasury ${stats.usdc_balance_usd:,.2f} · "
+                f"used ${stats.lifetime_spent_usd:,.2f} · available "
+                f"[bold]${stats.available_usd:,.4f}[/bold] · plan needs "
+                f"[bold]${total:,.4f}[/bold]."
+            )
+            console.print(
+                f"[dim]Top up: send USDC on {target.chain} to {target.address} — "
+                f"or run [cyan]veto-agents wallet receive[/cyan] to re-show the QR.[/dim]\n"
+            )
+            return
+        console.print(
+            f"[dim]Available credit: ${stats.available_usd:,.4f} "
+            f"(treasury ${stats.usdc_balance_usd:,.2f} − used ${stats.lifetime_spent_usd:,.4f})[/dim]\n"
+        )
+
     # 3. Consent gate (principle #1: plan-then-execute)
     if not auto_confirm:
         choice = Prompt.ask("Proceed?", choices=["y", "n"], default="y")
