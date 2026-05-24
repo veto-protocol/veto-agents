@@ -1,0 +1,46 @@
+policy_name: media-agent-default
+policy_version: 1
+description: |
+  Default policy for the Veto media agent. Caps reflect a casual creator
+  budget — tighten or loosen via `veto-agents policy edit media`.
+
+caps:
+  per_transaction_usd: 2.00
+  per_day_usd: 5.00
+  per_month_usd: 25.00
+  human_approval_above_usd: 1.50
+
+allowlist_merchants:
+  - replicate.com
+  - api.runwayml.com
+  - api.elevenlabs.io
+  - api.openai.com
+
+blocklist_merchants: []
+
+time_windows:
+  active_hours: "always"
+
+rate_limits:
+  txs_per_hour: 30
+  txs_per_day: 100
+
+categories:
+  allow:
+    - ai_inference
+    - media_generation
+  block:
+    - finance
+    - crypto_transfer
+    - shopping
+
+intent_keywords:
+  forbidden:
+    - nsfw
+    - celebrity_likeness
+    - minors
+
+behavior:
+  require_plan_preview: true
+  require_per_step_estimate: true
+  require_post_action_receipt_link: true
