@@ -30,7 +30,9 @@ from rich.console import Console
 from rich.prompt import Confirm, Prompt
 from rich.table import Table
 
-from . import __version__, config as cfg_module, registry
+from . import __version__, config as cfg_module, registry as registry_module
+from .funding import get_funding_target, render_funding_qr
+from .register import is_valid_evm_address, register as register_with_veto
 
 
 app = typer.Typer(
@@ -73,7 +75,7 @@ def _root(
 
 @app.command()
 def setup() -> None:
-    """First-time setup. Pick an LLM brain + provision a wallet."""
+    """First-time setup. Pick an LLM brain, provision a wallet, register with Veto."""
     console.print("\n[bold cyan]Veto Agents — first-run setup[/bold cyan]\n")
     console.print(
         "Veto governs every action your agents take. You stay in control. "
@@ -94,15 +96,27 @@ def setup() -> None:
         default=cfg.llm_provider,
     )
 
-    # 2. Wallet
-    console.print("\n[bold]Step 2.[/bold] Wallet.")
+    # 2. Wallet — user pastes their own (Phantom/Metamask/Coinbase Wallet/etc.)
+    console.print("\n[bold]Step 2.[/bold] Connect your wallet.")
     if cfg.wallet_address:
         console.print(f"  Existing wallet: [green]{cfg.wallet_address}[/green]")
     else:
-        if Confirm.ask("Provision an embedded wallet via Privy now?", default=True):
-            console.print("  [dim](provisioning flow lands in v0.0.2 — for now, paste an address you control)[/dim]")
-            addr = Prompt.ask("Wallet address (0x…) or skip", default="")
-            cfg.wallet_address = addr.strip() or None
+        console.print(
+            "  Paste the EVM-compatible address of a wallet you control "
+            "(Phantom, Metamask, Coinbase Wallet, Rabby — any of them).\n"
+            "  This is your identity with Veto and the source you'll fund "
+            "your agent treasury from."
+        )
+        while True:
+            addr = Prompt.ask("Your wallet address (0x…)").strip()
+            if not addr:
+                console.print("  [yellow]·[/yellow] Skipping wallet step. You'll need one before any agent can spend.")
+                break
+            if is_valid_evm_address(addr):
+                cfg.wallet_address = addr
+                console.print(f"  [green]✓[/green] {addr}")
+                break
+            console.print("  [red]✗[/red] Not a valid EVM address (expected 0x + 40 hex chars). Try again.")
 
     # 3. Policy posture
     console.print("\n[bold]Step 3.[/bold] Default policy posture for new agents.")
@@ -112,7 +126,46 @@ def setup() -> None:
         default=cfg.policy_posture,
     )
 
+    # 4. Register with Veto (idempotent — re-running setup won't create dupes)
+    if cfg.wallet_address and not cfg.api_key:
+        console.print("\n[bold]Step 4.[/bold] Register with Veto.")
+        try:
+            res = register_with_veto(
+                api_base=cfg.veto_api_base,
+                wallet_address=cfg.wallet_address,
+            )
+            cfg.api_key = res.api_key
+            cfg.agent_id = res.agent_id
+            cfg.client_id = res.client_id
+            new_or_existing = "new account" if res.is_new else "existing account"
+            console.print(
+                f"  [green]✓[/green] Registered ({new_or_existing}) · "
+                f"agent_id [dim]{res.agent_id}[/dim] · preset [cyan]{res.policy_preset}[/cyan]"
+            )
+        except Exception as e:
+            console.print(f"  [yellow]·[/yellow] Could not reach Veto register endpoint: {e}")
+            console.print("  [dim]Setup will continue locally — you can re-run `veto-agents setup` to retry.[/dim]")
+
     cfg_module.save(cfg)
+
+    # 5. Fund your agent — show QR code for the treasury contract
+    if cfg.wallet_address and cfg.api_key:
+        target = get_funding_target(cfg.wallet_address)
+        console.print("\n[bold]Step 5.[/bold] Fund your agent.")
+        console.print(
+            f"  Send [bold cyan]USDC on {target.chain}[/bold cyan] to the address below. "
+            "Scan with your phone wallet, or copy the address."
+        )
+        console.print()
+        console.print(render_funding_qr(target))
+        console.print(f"  Address: [cyan]{target.address}[/cyan]")
+        console.print(f"  Chain:   {target.chain} (chain id {target.chain_id})")
+        console.print(f"  Token:   USDC ({target.token_contract})")
+        console.print(
+            "\n  [dim]Mainnet + multi-chain bridges land in v0.4. For now, anything "
+            "you send is testnet USDC.[/dim]"
+        )
+
     console.print(
         f"\n[green]✓[/green] Setup complete. State at [dim]{cfg_module.state_dir()}[/dim]\n"
         f"Next: [cyan]veto-agents list[/cyan] to browse the agent catalog.\n"
@@ -134,7 +187,7 @@ def list_cmd() -> None:
     table.add_column("Spends on")
     table.add_column("", style="green", no_wrap=True)
 
-    for a in registry.REGISTRY:
+    for a in registry_module.REGISTRY:
         installed_marker = "✓ installed" if a.name in installed else ""
         table.add_row(a.name, a.one_line, a.spends_on, installed_marker)
 
@@ -153,10 +206,10 @@ def list_cmd() -> None:
 @app.command()
 def install(name: str = typer.Argument(..., help="Agent name (e.g. 'media').")) -> None:
     """Install an agent. Copies its default policy to ~/.veto-agents/policies/."""
-    entry = registry.get(name)
+    entry = registry_module.get(name)
     if entry is None:
         console.print(f"[red]✗[/red] Unknown agent: {name}")
-        console.print(f"  Available: {', '.join(registry.all_names())}")
+        console.print(f"  Available: {', '.join(registry_module.all_names())}")
         raise typer.Exit(1)
 
     cfg = cfg_module.load()
@@ -303,7 +356,7 @@ def _run_agent(name: str, prompt: str, *, yes: bool) -> None:
         raise typer.Exit(1)
 
     # Dynamic import — only loads the agent code (and its deps) when actually used.
-    entry = registry.get(name)
+    entry = registry_module.get(name)
     assert entry is not None
     try:
         mod = __import__(entry.package, fromlist=["run"])

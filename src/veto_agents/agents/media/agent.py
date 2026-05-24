@@ -122,8 +122,14 @@ def run(prompt: str, *, cfg, console: Console, auto_confirm: bool = False) -> No
             return
 
     # 4. Authorize + execute each step
-    client = VetoClient(api_base=cfg.veto_api_base)
-    agent_id = f"media-{(cfg.wallet_address or 'anon')[:14]}"
+    if not cfg.api_key or not cfg.agent_id:
+        console.print(
+            "[red]✗[/red] Not registered with Veto. Run [cyan]veto-agents setup[/cyan] first."
+        )
+        return
+
+    client = VetoClient(api_base=cfg.veto_api_base, api_key=cfg.api_key)
+    agent_id = cfg.agent_id
 
     actual_total = 0.0
     try:

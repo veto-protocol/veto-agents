@@ -58,11 +58,20 @@ class Config:
     llm_model: str | None = None  # e.g. "hermes-3-405b" or "claude-sonnet-4-7"
 
     # Wallet — populated by `veto-agents setup`.
+    # In v0.0.2 this is a burner address (random 20 bytes hex-encoded). In
+    # v0.0.3 it's replaced with a real Privy-provisioned wallet on Base.
     wallet_address: str | None = None
     wallet_chain: str = "base"
 
     # Veto governance endpoint. Defaults to prod; overridable for local dev.
     veto_api_base: str = "https://veto-ai.com/api/v1"
+
+    # Credentials issued by Veto on first-run register call.
+    # api_key is sent as Bearer on every authorize request.
+    # agent_id is included in the authorize payload as the acting agent.
+    api_key: str | None = None
+    agent_id: str | None = None
+    client_id: str | None = None
 
     # Default policy posture: "strict" | "balanced" | "permissive". Affects
     # the caps the user gets when installing a new agent (the policy file
