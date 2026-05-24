@@ -116,9 +116,12 @@ def setup() -> None:
 
         console.print(
             f"  [green]✓[/green] Magic link sent to [cyan]{email}[/cyan].\n"
-            "  Click the link in your inbox to finish signing in.\n"
+            "  Opening your inbox in a browser now — click the link to finish signing in.\n"
             "  [dim](Waiting up to 10 minutes. Press Ctrl-C to abort.)[/dim]\n"
         )
+        inbox_url = auth.open_inbox_for(email)
+        if inbox_url:
+            console.print(f"  [dim]Opened: {inbox_url}[/dim]\n")
 
         try:
             with console.status("[dim]waiting for the click…[/dim]", spinner="dots"):

@@ -24,6 +24,7 @@ from __future__ import annotations
 import re
 import secrets
 import time
+import webbrowser
 from dataclasses import dataclass
 
 import httpx
@@ -34,6 +35,43 @@ _EMAIL_RE = re.compile(r"^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$")
 
 def is_valid_email(s: str) -> bool:
     return bool(_EMAIL_RE.match(s.strip())) and len(s.strip()) <= 254
+
+
+# Map common email domains → their webmail UI. For corporate / custom
+# domains we fall back to opening the domain root (which usually has a
+# mail subdomain or a "login" link visible).
+_WEBMAIL = {
+    "gmail.com":        "https://mail.google.com",
+    "googlemail.com":   "https://mail.google.com",
+    "outlook.com":      "https://outlook.live.com",
+    "hotmail.com":      "https://outlook.live.com",
+    "live.com":         "https://outlook.live.com",
+    "msn.com":          "https://outlook.live.com",
+    "yahoo.com":        "https://mail.yahoo.com",
+    "ymail.com":        "https://mail.yahoo.com",
+    "icloud.com":       "https://www.icloud.com/mail",
+    "me.com":           "https://www.icloud.com/mail",
+    "mac.com":          "https://www.icloud.com/mail",
+    "protonmail.com":   "https://mail.proton.me",
+    "proton.me":        "https://mail.proton.me",
+    "pm.me":            "https://mail.proton.me",
+    "fastmail.com":     "https://app.fastmail.com",
+    "hey.com":          "https://app.hey.com",
+}
+
+
+def open_inbox_for(email: str) -> str | None:
+    """Open the user's webmail in a browser tab. Returns the URL opened (or None)."""
+    try:
+        domain = email.split("@", 1)[1].strip().lower()
+    except IndexError:
+        return None
+    url = _WEBMAIL.get(domain) or f"https://{domain}"
+    try:
+        webbrowser.open(url)
+    except Exception:
+        return None
+    return url
 
 
 def generate_device_code() -> str:
