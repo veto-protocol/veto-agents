@@ -25,6 +25,7 @@ from rich.prompt import Prompt
 from rich.table import Table
 
 from ...veto_client import AuthorizeResult, VetoClient
+from .tools import replicate_image
 
 
 @dataclass
@@ -56,9 +57,9 @@ def _classify_brief(prompt: str) -> list[Step]:
     elif any(w in p for w in ("image", "picture", "photo", "logo", "icon", "shot")):
         steps.append(
             Step(
-                label="Generate image — Replicate (Flux)",
+                label="Generate image — Replicate (Flux Schnell)",
                 merchant="replicate.com",
-                est_usd=0.03,
+                est_usd=replicate_image.estimate_cost("flux-schnell"),
                 tool_name="replicate.image_gen",
             )
         )
@@ -77,9 +78,9 @@ def _classify_brief(prompt: str) -> list[Step]:
     if not steps:
         steps.append(
             Step(
-                label="Generate image — Replicate (Flux) [inferred]",
+                label="Generate image — Replicate (Flux Schnell) [inferred]",
                 merchant="replicate.com",
-                est_usd=0.03,
+                est_usd=replicate_image.estimate_cost("flux-schnell"),
                 tool_name="replicate.image_gen",
             )
         )
@@ -156,19 +157,37 @@ def run(prompt: str, *, cfg, console: Console, auto_confirm: bool = False) -> No
                 return
 
             if result.verdict == "allow":
-                actual = s.est_usd  # v0.0.1 — actual == estimate. v0.0.2 reconciles.
-                actual_total += actual
                 console.print(
-                    f"  [green]✓ allowed[/green] · actual ${actual:.2f}"
-                    + (
-                        f" · receipt {result.receipt_url}"
-                        if result.receipt_url
-                        else ""
+                    f"  [green]✓ allowed[/green] by Veto"
+                    + (f" · receipt {result.receipt_url}" if result.receipt_url else "")
+                )
+
+                # Execute the real tool call. v0.0.3: only replicate.image_gen
+                # is real; Runway video + ElevenLabs voice still stubs until
+                # we wire each. The agent transparently reports which.
+                if s.tool_name == "replicate.image_gen":
+                    tool_result = replicate_image.generate(prompt=prompt)
+                    actual = tool_result.actual_cost_usd
+                    actual_total += actual
+                    if tool_result.ok:
+                        console.print(
+                            f"  [green]✓ done[/green] · actual ${actual:.4f} "
+                            f"· file [cyan]{tool_result.output_path}[/cyan]"
+                        )
+                    else:
+                        console.print(
+                            f"  [red]✗ tool failed[/red] (Veto already authorized + recorded)"
+                        )
+                        console.print(f"  [dim]{tool_result.error}[/dim]")
+                        return
+                else:
+                    # Runway video / ElevenLabs voice still stubbed in v0.0.3
+                    actual = s.est_usd
+                    actual_total += actual
+                    console.print(
+                        f"  [yellow]·[/yellow] tool call stubbed for [dim]{s.tool_name}[/dim] "
+                        f"(coming v0.0.4) · est-cost ${actual:.2f}"
                     )
-                )
-                console.print(
-                    "  [dim](tool call stubbed in v0.0.1 — real Replicate/Runway/ElevenLabs wiring lands in v0.0.2)[/dim]"
-                )
             elif result.verdict == "deny":
                 console.print(
                     f"  [red]✗ denied[/red] · reason: {', '.join(result.reason_codes) or 'policy'}"
