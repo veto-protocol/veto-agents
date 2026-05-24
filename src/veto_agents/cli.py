@@ -31,8 +31,9 @@ from rich.prompt import Confirm, Prompt
 from rich.table import Table
 
 from . import __version__, config as cfg_module, registry as registry_module
+from . import auth
 from .funding import get_funding_target, render_funding_qr
-from .register import is_valid_evm_address, register as register_with_veto
+from .register import is_valid_evm_address
 
 
 app = typer.Typer(
@@ -96,60 +97,87 @@ def setup() -> None:
         default=cfg.llm_provider,
     )
 
-    # 2. Wallet — user pastes their own (Phantom/Metamask/Coinbase Wallet/etc.)
-    console.print("\n[bold]Step 2.[/bold] Connect your wallet.")
+    # 2. Sign in via magic-link email (the real Veto auth flow)
+    if not cfg.api_key:
+        console.print("\n[bold]Step 2.[/bold] Sign in with email (magic link).")
+        while True:
+            email = Prompt.ask("Your email").strip().lower()
+            if auth.is_valid_email(email):
+                break
+            console.print("  [red]✗[/red] That doesn't look like a valid email. Try again.")
+
+        device_code = auth.generate_device_code()
+        try:
+            auth.start(api_base=cfg.veto_api_base, email=email, device_code=device_code)
+        except Exception as e:
+            console.print(f"  [red]✗[/red] Could not start sign-in: {e}")
+            console.print("  [dim]Retry with `veto-agents setup` once the connection's back.[/dim]")
+            return
+
+        console.print(
+            f"  [green]✓[/green] Magic link sent to [cyan]{email}[/cyan].\n"
+            "  Click the link in your inbox to finish signing in.\n"
+            "  [dim](Waiting up to 10 minutes. Press Ctrl-C to abort.)[/dim]\n"
+        )
+
+        try:
+            with console.status("[dim]waiting for the click…[/dim]", spinner="dots"):
+                ready = auth.poll_until_ready(
+                    api_base=cfg.veto_api_base,
+                    device_code=device_code,
+                )
+        except KeyboardInterrupt:
+            console.print("\n[yellow]·[/yellow] Aborted. Re-run `veto-agents setup` when ready.")
+            return
+        except TimeoutError as e:
+            console.print(f"\n[red]✗[/red] {e}")
+            return
+        except Exception as e:
+            console.print(f"\n[red]✗[/red] Auth poll failed: {e}")
+            return
+
+        cfg.api_key = ready.api_key
+        cfg.agent_id = ready.agent_id
+        cfg.client_id = ready.client_id
+        console.print(
+            f"  [green]✓[/green] Signed in as [cyan]{email}[/cyan] · "
+            f"agent_id [dim]{ready.agent_id}[/dim]"
+        )
+    else:
+        console.print(f"\n[bold]Step 2.[/bold] Already signed in (agent_id [dim]{cfg.agent_id}[/dim]).")
+
+    # 3. Funding wallet address (the one you'll send USDC FROM)
+    console.print("\n[bold]Step 3.[/bold] The wallet you'll fund your agent from.")
     if cfg.wallet_address:
-        console.print(f"  Existing wallet: [green]{cfg.wallet_address}[/green]")
+        console.print(f"  Existing: [green]{cfg.wallet_address}[/green]")
     else:
         console.print(
-            "  Paste the EVM-compatible address of a wallet you control "
-            "(Phantom, Metamask, Coinbase Wallet, Rabby — any of them).\n"
-            "  This is your identity with Veto and the source you'll fund "
-            "your agent treasury from."
+            "  Paste an EVM address (Phantom/Metamask/Coinbase Wallet/Rabby — anything you control). "
+            "  This is just so we know which deposit on Base Sepolia is yours."
         )
         while True:
-            addr = Prompt.ask("Your wallet address (0x…)").strip()
+            addr = Prompt.ask("Your wallet address (0x…)", default="").strip()
             if not addr:
-                console.print("  [yellow]·[/yellow] Skipping wallet step. You'll need one before any agent can spend.")
+                console.print("  [yellow]·[/yellow] Skipped. You can paste it later via `veto-agents wallet set <addr>`.")
                 break
             if is_valid_evm_address(addr):
                 cfg.wallet_address = addr
                 console.print(f"  [green]✓[/green] {addr}")
                 break
-            console.print("  [red]✗[/red] Not a valid EVM address (expected 0x + 40 hex chars). Try again.")
+            console.print("  [red]✗[/red] Not a valid EVM address. Try again.")
 
-    # 3. Policy posture
-    console.print("\n[bold]Step 3.[/bold] Default policy posture for new agents.")
+    # 4. Policy posture
+    console.print("\n[bold]Step 4.[/bold] Default policy posture for new agents.")
     cfg.policy_posture = Prompt.ask(
         "Posture",
         choices=["strict", "balanced", "permissive"],
         default=cfg.policy_posture,
     )
 
-    # 4. Register with Veto (idempotent — re-running setup won't create dupes)
-    if cfg.wallet_address and not cfg.api_key:
-        console.print("\n[bold]Step 4.[/bold] Register with Veto.")
-        try:
-            res = register_with_veto(
-                api_base=cfg.veto_api_base,
-                wallet_address=cfg.wallet_address,
-            )
-            cfg.api_key = res.api_key
-            cfg.agent_id = res.agent_id
-            cfg.client_id = res.client_id
-            new_or_existing = "new account" if res.is_new else "existing account"
-            console.print(
-                f"  [green]✓[/green] Registered ({new_or_existing}) · "
-                f"agent_id [dim]{res.agent_id}[/dim] · preset [cyan]{res.policy_preset}[/cyan]"
-            )
-        except Exception as e:
-            console.print(f"  [yellow]·[/yellow] Could not reach Veto register endpoint: {e}")
-            console.print("  [dim]Setup will continue locally — you can re-run `veto-agents setup` to retry.[/dim]")
-
     cfg_module.save(cfg)
 
     # 5. Fund your agent — show QR code for the treasury contract
-    if cfg.wallet_address and cfg.api_key:
+    if cfg.api_key:
         target = get_funding_target(cfg.wallet_address)
         console.print("\n[bold]Step 5.[/bold] Fund your agent.")
         console.print(
