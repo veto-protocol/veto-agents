@@ -4,6 +4,31 @@
 
 A curated set of consumer AI agents — each one designed from day zero to spend money to do real work for you, every action governed by [Veto](https://veto-ai.com), every spend signed, every verdict verifiable.
 
+## Install
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/veto-protocol/veto-agents/main/install.sh | bash
+```
+
+Then:
+
+```bash
+veto-agents                           # walks first-time setup (email, wallet, QR funding)
+veto-agents install media             # add your first agent + paste the Replicate token it asks for
+veto-agents media "make a neon jellyfish in cyberpunk rain"
+```
+
+Three commands. The agent generates the image, Veto authorizes the spend, you get a signed receipt at `veto-ai.com/r/<uuid>`. That's the loop.
+
+<details>
+<summary>Other install paths</summary>
+
+- **Already have pipx:** `pipx install veto-agents`
+- **Already have Python + want to be reckless:** `pip install veto-agents` (not recommended — pollutes global)
+- **Manual:** clone the repo, `pip install -e .` in a venv
+
+</details>
+
 ## The bet
 
 Agents are about to spend a lot of money. Today's general agent frameworks (Hermes, OpenClaw, n8n) treat payments as an afterthought — a tool the agent *might* call if you wire it up. Veto Agents inverts that: every agent in this catalog is built around the assumption that **it has money and will spend it.** Veto governance is not a feature — it's the only way the agent works at all.
