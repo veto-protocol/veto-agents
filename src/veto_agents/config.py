@@ -9,10 +9,16 @@ reads/writes:
   - receipts.sqlite      local cache of receipts (the source of truth lives at
                          veto-ai.com; this is a convenience)
   - secrets via OS keychain (never on disk)
+
+If the user has already signed in via the main `veto` CLI (which writes to
+~/.veto/config.json), we detect it and reuse those credentials — no second
+magic-link round-trip. See try_import_main_cli_credentials().
 """
 
 from __future__ import annotations
 
+import json
+import os
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
@@ -93,3 +99,43 @@ def load() -> Config:
 def save(cfg: Config) -> None:
     p = config_path()
     p.write_text(yaml.safe_dump(asdict(cfg), sort_keys=False))
+
+
+# ── Cross-CLI credential reuse ────────────────────────────────────────────
+
+# Where the main `veto` (Python veto-cli) saves state. The npm
+# @veto-protocol/cli uses the OS keychain instead, which we don't read —
+# user is far less likely to install both the npm CLI AND veto-agents on
+# the same machine. Python veto-cli is the realistic overlap.
+MAIN_CLI_STATE_PATH = os.path.expanduser("~/.veto/config.json")
+
+
+def read_main_cli_state() -> dict | None:
+    """Return the main veto CLI's saved state (~/.veto/config.json) or None.
+
+    Used by veto-agents setup to detect "user already signed in via the
+    main CLI" so we can reuse credentials and skip the second sign-in.
+    """
+    p = Path(MAIN_CLI_STATE_PATH)
+    if not p.exists():
+        return None
+    try:
+        data = json.loads(p.read_text())
+    except Exception:
+        return None
+    if not isinstance(data, dict) or not data.get("api_key"):
+        return None
+    return data
+
+
+def import_from_main_cli(cfg: Config, main_state: dict) -> Config:
+    """Copy api_key + agent_id + client_id + email from the main CLI's
+    state into a veto-agents Config. Leaves wallet/posture/LLM alone —
+    those are veto-agents-specific concerns the user still picks once."""
+    cfg.api_key = main_state.get("api_key") or cfg.api_key
+    cfg.agent_id = main_state.get("default_agent") or main_state.get("agent_id") or cfg.agent_id
+    cfg.client_id = main_state.get("client_id") or cfg.client_id
+    base = main_state.get("base_url")
+    if base and "/api/v1" not in cfg.veto_api_base:
+        cfg.veto_api_base = f"{base.rstrip('/')}/api/v1"
+    return cfg

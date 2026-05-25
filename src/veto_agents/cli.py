@@ -121,7 +121,24 @@ def setup() -> None:
         default=cfg.llm_provider,
     )
 
-    # 2. Sign in via magic-link email (the real Veto auth flow)
+    # 2. Sign in. First check if the main `veto` CLI already signed this
+    # user in — if so we just reuse those credentials, no second sign-in.
+    if not cfg.api_key:
+        main_state = cfg_module.read_main_cli_state()
+        if main_state and main_state.get("api_key"):
+            existing_email = main_state.get("email", "(unknown)")
+            console.print(
+                f"\n[bold]Step 2.[/bold] Found existing Veto credentials from the main "
+                f"[cyan]veto[/cyan] CLI ([cyan]{existing_email}[/cyan])."
+            )
+            if Confirm.ask("  Reuse them? (skips the magic-link step)", default=True):
+                cfg = cfg_module.import_from_main_cli(cfg, main_state)
+                console.print(
+                    f"  [green]✓[/green] Reusing credentials · "
+                    f"agent_id [dim]{cfg.agent_id}[/dim]"
+                )
+                cfg_module.save(cfg)
+
     if not cfg.api_key:
         console.print("\n[bold]Step 2.[/bold] Sign in with email (magic link).")
         while True:
