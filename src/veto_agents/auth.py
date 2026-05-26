@@ -60,17 +60,28 @@ _WEBMAIL = {
 }
 
 
-def open_inbox_for(email: str) -> str | None:
-    """Open the user's webmail in a browser tab. Returns the URL opened (or None)."""
+def webmail_url_for(email: str) -> str | None:
+    """Compute the webmail URL for an email, no side effects.
+    Returns None only if the email has no `@`."""
     try:
         domain = email.split("@", 1)[1].strip().lower()
     except IndexError:
         return None
-    url = _WEBMAIL.get(domain) or f"https://{domain}"
+    return _WEBMAIL.get(domain) or f"https://{domain}"
+
+
+def open_inbox_for(email: str) -> str | None:
+    """Compute the webmail URL and best-effort open it in a browser.
+    Always returns the URL when the email is valid — caller should
+    print it as a fallback for when the browser doesn't actually open
+    (headless sessions, missing default browser, sandboxing, etc.)."""
+    url = webmail_url_for(email)
+    if url is None:
+        return None
     try:
         webbrowser.open(url)
     except Exception:
-        return None
+        pass  # best-effort; the caller will print the URL regardless
     return url
 
 

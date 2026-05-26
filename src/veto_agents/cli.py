@@ -31,9 +31,60 @@ from rich.prompt import Confirm, Prompt
 from rich.table import Table
 
 from . import __version__, config as cfg_module, credentials as creds_module, registry as registry_module
-from . import auth, banner, llm_providers, wallet_setup as wallet_setup_module
+from . import auth, auth_creds, banner, llm_providers, wallet_setup as wallet_setup_module
 from .funding import get_funding_target, render_funding_qr
 from .register import is_valid_evm_address
+
+
+# ─── small UX helpers ─────────────────────────────────────────────────────
+
+
+def _mask_key(key: str) -> str:
+    """Same masked format the main `veto` CLI uses: first 12 chars … last 4.
+    Falls back to "(saved)" for very short strings so we never accidentally
+    print the whole credential."""
+    if not key:
+        return ""
+    if len(key) <= 20:
+        return "(saved)"
+    return f"{key[:12]}…{key[-4:]}"
+
+
+def _try_it_command(cfg) -> str:
+    """A concrete, copy-pasteable command for the user to run after sign-in.
+    Picks the first installed agent and pairs it with a sensible example
+    brief. Falls back to `veto-agents` (the status screen) when no agent
+    is installed yet."""
+    examples = {
+        "media":    'veto-agents media "an instagram carousel for a coffee shop launch — 3 frames"',
+        "groups":   'veto-agents groups "draft a welcome message for new Telegram members"',
+        "research": 'veto-agents research "find the top 5 x402-adjacent open-source repos this month"',
+        "inbox":    'veto-agents inbox "summarize my last 24 hours of email"',
+        "build":    'veto-agents build "scaffold a Vite + React + Tailwind landing page"',
+    }
+    for name in (cfg.installed_agents or []):
+        if name in examples:
+            return examples[name]
+    return "veto-agents"
+
+
+def _render_signed_in(console: Console, cfg, *, try_it: str | None = None) -> None:
+    """Standard post-signin success display. Mirrors the main `veto` CLI:
+    ✓ Signed in as <email> + masked api_key + agent_id + stored-in line,
+    then a concrete `Try it:` command. Used by both the magic-link path
+    and the main-CLI-credentials reuse path so the user sees the same
+    confirmation regardless of which route got them here."""
+    email = cfg.email or "(unknown)"
+    masked = _mask_key(cfg.api_key or "")
+    agent_id = cfg.agent_id or "(none)"
+    where = auth_creds.backend_kind()
+    cmd = try_it or _try_it_command(cfg)
+
+    console.print(f"\n  [green]✓[/green] Signed in as [cyan]{email}[/cyan].")
+    console.print(
+        f"    [dim]api_key={masked}  agent_id={agent_id}  stored in: {where}[/dim]"
+    )
+    console.print(f"\n  [bold]Try it:[/bold]  [cyan]{cmd}[/cyan]\n")
 
 
 app = typer.Typer(
@@ -244,21 +295,23 @@ def setup() -> None:
 
     # 2. Sign in. First check if the main `veto` CLI already signed this
     # user in — if so we just reuse those credentials, no second sign-in.
+    just_signed_in = False  # tracks whether we should render the success block
     if not cfg.api_key:
         main_state = cfg_module.read_main_cli_state()
         if main_state and main_state.get("api_key"):
             existing_email = main_state.get("email", "(unknown)")
             console.print(
-                f"\n[bold]Existing account detected[/bold] — credentials from the main "
-                f"[cyan]veto[/cyan] CLI ([cyan]{existing_email}[/cyan])."
+                f"\n[bold]Reuse your main Veto sign-in?[/bold]"
             )
-            if Confirm.ask("  Reuse them? (skips the magic-link step)", default=True):
+            console.print(
+                f"  [dim]Detected credentials for[/dim] [cyan]{existing_email}[/cyan] "
+                f"[dim]from the main `veto` CLI. Saying yes skips the magic-link "
+                f"round-trip — same account, both CLIs.[/dim]"
+            )
+            if Confirm.ask("  Reuse them?", default=True):
                 cfg = cfg_module.import_from_main_cli(cfg, main_state)
-                console.print(
-                    f"  [green]✓[/green] Reusing credentials · "
-                    f"agent_id [dim]{cfg.agent_id}[/dim]"
-                )
                 cfg_module.save(cfg)
+                just_signed_in = True
 
     if not cfg.api_key:
         console.print("\n[bold]Sign in[/bold]  [dim](magic link, no password)[/dim]")
@@ -276,14 +329,26 @@ def setup() -> None:
             console.print("  [dim]Retry with `veto-agents setup` once the connection's back.[/dim]")
             return
 
+        # Magic-link wait UX: we always print the webmail URL, regardless of
+        # whether the browser auto-opens successfully. Headless terminals,
+        # SSH sessions, sandboxed environments, custom default-browser
+        # configs — too many ways the silent open fails. The visible URL is
+        # the user's guaranteed recourse.
+        webmail = auth.webmail_url_for(email)
+        auth.open_inbox_for(email)  # best-effort side effect
         console.print(
-            f"  [green]✓[/green] Magic link sent to [cyan]{email}[/cyan].\n"
-            "  Opening your inbox in a browser now — click the link to finish signing in.\n"
+            f"\n  [green]✓[/green] Magic link sent to [cyan]{email}[/cyan]."
+        )
+        console.print(
+            "  [dim]Click the button in the email to sign in. "
+            "Check spam if it doesn't arrive in ~30s — links come "
+            "from [/dim][cyan]auth@veto-ai.com[/cyan][dim].[/dim]"
+        )
+        if webmail:
+            console.print(f"  [dim]→ open[/dim] [cyan]{webmail}[/cyan]")
+        console.print(
             "  [dim](Waiting up to 15 minutes. Press Ctrl-C to abort.)[/dim]\n"
         )
-        inbox_url = auth.open_inbox_for(email)
-        if inbox_url:
-            console.print(f"  [dim]Opened: {inbox_url}[/dim]\n")
 
         try:
             with console.status("[dim]waiting for the click…[/dim]", spinner="dots"):
@@ -304,12 +369,20 @@ def setup() -> None:
         cfg.api_key = ready.api_key
         cfg.agent_id = ready.agent_id
         cfg.client_id = ready.client_id
-        console.print(
-            f"  [green]✓[/green] Signed in as [cyan]{email}[/cyan] · "
-            f"agent_id [dim]{ready.agent_id}[/dim]"
-        )
+        cfg.email = email
+        # Persist creds NOW so the keychain is updated even if the user
+        # quits before the rest of setup finishes.
+        cfg_module.save(cfg)
+        just_signed_in = True
     else:
-        console.print(f"\n[dim]Already signed in (agent_id {cfg.agent_id}).[/dim]")
+        # Already signed in (came in with credentials); say so quietly.
+        console.print(
+            f"\n[dim]Already signed in as [cyan]{cfg.email or cfg.agent_id}[/cyan] · "
+            f"stored in {auth_creds.backend_kind()}.[/dim]"
+        )
+
+    if just_signed_in:
+        _render_signed_in(console, cfg)
 
     # Policy posture — numbered picker for consistency with the LLM picker.
     console.print("\n[bold]Policy posture[/bold]  [dim]for new agents (you can tweak per-agent later)[/dim]\n")
