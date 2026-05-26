@@ -24,7 +24,6 @@ fi
 ok()   { printf '  %s✓%s %s\n' "$GREEN" "$RESET" "$*"; }
 warn() { printf '  %s·%s %s\n' "$YELLOW" "$RESET" "$*"; }
 err()  { printf '  %s✗%s %s\n' "$RED" "$RESET" "$*" >&2; exit 1; }
-say()  { printf '  %s\n' "$*"; }
 
 # ── banner ────────────────────────────────────────────────────────
 printf '\n'
@@ -43,8 +42,14 @@ printf '  %s   ▀███████████▙      ▟▀    ▀██�
 printf '  %s    ▔▀██████████▖     ▔      ▔▀▜█████▀▘    ▝▜████    ▀▀████▛▀▔%s\n' "$BOLD$CYAN" "$RESET"
 printf '  %s       ▔▀▀▀█████▛%s\n' "$BOLD$CYAN" "$RESET"
 printf '\n'
-printf '  %sAI agents that pay for things, governed by Veto.%s   %s%sveto-ai.com%s\n\n' \
-  "$DIM" "$RESET" "$BOLD" "$CYAN" "$RESET"
+
+# ── title block ───────────────────────────────────────────────────
+# We say "Veto Agents" explicitly so users know they're installing the
+# agent CLI, not the main Veto governance CLI (different package).
+printf '  %sVeto Agents%s   %sthe consumer CLI for 24/7 specialist AI agents%s\n' \
+  "$BOLD$CYAN" "$RESET" "$DIM" "$RESET"
+printf '  %spowered by veto-ai.com — install one agent, add more anytime%s\n\n' \
+  "$DIM" "$RESET"
 
 # ── OS check ──────────────────────────────────────────────────────
 OS="$(uname -s)"
@@ -74,34 +79,24 @@ if [ -z "$_PY" ]; then
 fi
 
 # ── Helper (private, silent) — installs the isolated env runner ───
-_INSTALLER=""
-if command -v pipx >/dev/null 2>&1; then
-  _INSTALLER="pipx"
-else
-  # First-time: install the isolated-env helper for them, silently.
+if ! command -v pipx >/dev/null 2>&1; then
   if [ "$PLATFORM" = "macos" ] && command -v brew >/dev/null 2>&1; then
     brew install pipx >/dev/null 2>&1 || true
   fi
   if ! command -v pipx >/dev/null 2>&1; then
     "$_PY" -m pip install --user --quiet pipx >/dev/null 2>&1 || \
-      err "Couldn't bootstrap the install helper. Try: ${CYAN}$_PY -m pip install --user pipx${RESET} then re-run."
+      err "Couldn't bootstrap the install helper."
   fi
   command -v pipx >/dev/null 2>&1 || export PATH="$HOME/.local/bin:$PATH"
-  _INSTALLER="pipx"
 fi
 
 # ── Install ───────────────────────────────────────────────────────
-# Install with all optional extras so every agent works out of the box.
-# (Adds python-telegram-bot for Groups, anthropic for Media/Groups replies, etc.)
 printf '  %s…%s installing veto-agents' "$DIM" "$RESET"
 if ! pipx install --force "veto-agents[all]" >/dev/null 2>&1; then
   printf '\r\033[K'
   err "Install failed. Try: ${CYAN}pipx install --force 'veto-agents[all]'${RESET}"
 fi
-# \r + \033[K clears the in-place progress line before printing the ✓ — otherwise
-# the trailing chars of "installing veto-agents" peek through (it's longer than
-# "installed").
-printf '\r\033[K' && ok "veto-agents installed"
+printf '\r\033[K' && ok "Installed."
 
 # Ensure ~/.local/bin (or pipx's chosen location) is on PATH for future shells.
 pipx ensurepath >/dev/null 2>&1 || true
@@ -111,7 +106,23 @@ if ! command -v veto-agents >/dev/null 2>&1; then
   fi
 fi
 
-# ── PATH check + hint ─────────────────────────────────────────────
+# ── Explanation block ─────────────────────────────────────────────
+cat <<EOF
+
+  ${BOLD}What you just installed${RESET}
+
+  ${DIM}Veto Agents lets you install AI agents that work for you 24/7.${RESET}
+  ${DIM}Each one has a specific job — generate media, deploy code, run a${RESET}
+  ${DIM}Telegram community, do research — and spends real money to do it${RESET}
+  ${DIM}(LLM calls, APIs, infrastructure). Veto enforces the caps you set,${RESET}
+  ${DIM}so no agent can blow your budget. Every action is cryptographically${RESET}
+  ${DIM}signed, so you have a complete audit trail.${RESET}
+
+  ${DIM}You pick one agent to start. You can add more anytime.${RESET}
+
+EOF
+
+# ── PATH check ────────────────────────────────────────────────────
 SHELL_NAME="$(basename "${SHELL:-bash}")"
 case "$SHELL_NAME" in
   zsh)  RC_FILE="$HOME/.zshrc" ;;
@@ -124,16 +135,36 @@ if "$SHELL" -l -c 'echo "$PATH"' 2>/dev/null | tr ':' '\n' | grep -qx "$HOME/.lo
   ON_PATH=true
 fi
 
-# ── Done ──────────────────────────────────────────────────────────
-printf '\n'
+# ── Y/n prompt — start now or later ───────────────────────────────
+# When invoked via `curl | bash`, the script's stdin is the pipe, not the
+# terminal. We redirect /dev/tty in for the prompt + the launched CLI so
+# the interactive wizard actually works.
+if [ -e /dev/tty ] && command -v veto-agents >/dev/null 2>&1; then
+  printf '  %sSet up your first agent now?%s  %s[Y/n]%s ' "$BOLD" "$RESET" "$DIM" "$RESET"
+  if read -r REPLY < /dev/tty 2>/dev/null; then
+    REPLY="${REPLY:-Y}"
+    case "$REPLY" in
+      [Yy]*)
+        printf '\n'
+        exec veto-agents < /dev/tty
+        ;;
+      *)
+        printf '\n  No rush. When you are ready:\n\n'
+        printf '    %sveto-agents%s\n\n' "$CYAN" "$RESET"
+        exit 0
+        ;;
+    esac
+  fi
+fi
 
+# Fallback (no TTY, or PATH issue) — give the user a clear next step.
 if $ON_PATH; then
-  printf '  %sReady.%s Try:\n\n' "$BOLD$GREEN" "$RESET"
+  printf '  When you are ready, run:\n\n'
   printf '    %sveto-agents%s\n\n' "$CYAN" "$RESET"
 else
-  printf '  %sAlmost done.%s One more thing — your shell needs to pick up the new binary.\n' "$BOLD" "$RESET"
+  printf '  %sOne more thing.%s Your shell needs to pick up the new binary.\n' "$BOLD" "$RESET"
   if [ -n "$RC_FILE" ]; then
-    printf '  Either open a new terminal tab, or run:\n\n'
+    printf '  Open a new terminal tab, or run:\n\n'
     printf '    %ssource %s && veto-agents%s\n\n' "$CYAN" "$RC_FILE" "$RESET"
   else
     printf '  Open a new terminal tab, then run:\n\n'
