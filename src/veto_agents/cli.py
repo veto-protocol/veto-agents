@@ -39,7 +39,7 @@ from .register import is_valid_evm_address
 app = typer.Typer(
     name="veto-agents",
     help="AI agents that pay for things on your behalf, with the safety built in.",
-    no_args_is_help=True,
+    no_args_is_help=False,  # callback handles bare-invocation (wizard or status)
     add_completion=False,
 )
 
@@ -68,68 +68,97 @@ def _root(
         raise typer.Exit(0)
     if ctx.invoked_subcommand is None:
         cfg = cfg_module.load()
-        # First run? Launch the agent-picker wizard — pick one agent to start,
-        # no email/wallet/magic-link required. Inspired by Franklin's
-        # "start free, upgrade by funding" pattern: get the user to a working
-        # agent in the fewest possible steps.
+        # First run with no agents installed → wizard. Subsequent runs → status.
         if not cfg.installed_agents:
             _first_run_wizard(ctx)
-            return
-        # Returning user with agents installed: show status + help.
-        installed = ", ".join(cfg.installed_agents)
-        signed_in = bool(cfg.api_key)
-        status_line = (
-            f"signed in · receipts on" if signed_in
-            else "[yellow]local mode[/yellow] · no signed receipts yet  "
-                 "[dim](upgrade: veto-agents account upgrade)[/dim]"
-        )
-        console.print(
-            f"\n[bold]veto-agents[/bold] {__version__}  ·  agents: [cyan]{installed}[/cyan]\n"
-            f"[dim]status:[/dim] {status_line}\n"
-        )
-        console.print(ctx.get_help())
+        else:
+            _render_status(cfg)
+
+
+def _render_status(cfg) -> None:
+    """The default screen a returning user sees. Status of their setup +
+    1-3 next actions. Not a Typer help dump."""
+    banner.render(console, subtitle="AI agents that pay for things, governed by Veto")
+
+    installed = cfg.installed_agents
+    agents_line = " · ".join(f"[cyan]{a}[/cyan]" for a in installed)
+
+    # Account state
+    if cfg.api_key:
+        email_hint = "  [dim](veto-agents account)[/dim]"
+        account_line = f"[green]signed in[/green]{email_hint}"
+    else:
+        account_line = "[yellow]local mode[/yellow]  [dim](upgrade: veto-agents account upgrade)[/dim]"
+
+    # Wallet state
+    if cfg.wallet_address:
+        short = cfg.wallet_address[:8] + "…" + cfg.wallet_address[-4:]
+        wallet_line = f"[green]connected[/green] · {short}"
+    else:
+        wallet_line = "[dim]not set yet  (veto-agents wallet setup)[/dim]"
+
+    table = Table(show_header=False, box=None, pad_edge=False, padding=(0, 2))
+    table.add_column("k", style="dim", no_wrap=True)
+    table.add_column("v")
+    table.add_row("Agents", agents_line or "[dim]none yet[/dim]")
+    table.add_row("Account", account_line)
+    table.add_row("Wallet", wallet_line)
+    console.print(table)
+
+    # Next-action suggestions — what an AI coding agent (or a human) can run now.
+    console.print()
+    console.print("[bold]Try:[/bold]")
+    example_for = installed[0] if installed else "media"
+    examples = {
+        "media": '"make a neon jellyfish in cyberpunk rain"',
+        "build": '"deploy this repo to the cheapest provider"',
+        "research": '"research the top 5 papers on agent governance"',
+        "inbox": '"triage my inbox from this week"',
+        "groups": '"--daemon  (run as a 24/7 Telegram bot)"',
+    }
+    example_prompt = examples.get(example_for, '"<your prompt>"')
+    console.print(f"  [cyan]veto-agents {example_for}[/cyan] {example_prompt}")
+    if not cfg.api_key:
+        console.print("  [cyan]veto-agents account upgrade[/cyan]  enable signed receipts")
+    if not cfg.wallet_address and cfg.api_key:
+        console.print("  [cyan]veto-agents wallet setup[/cyan]    enable on-chain spending governance")
+    console.print(
+        f"\n[dim]All commands: [cyan]veto-agents --help[/cyan]  ·  version {__version__}[/dim]\n"
+    )
 
 
 def _first_run_wizard(ctx: typer.Context) -> None:
-    """The fresh-install onboarding. ZERO required prompts before useful work.
-
-    Flow:
-      1. Banner
-      2. Pick ONE agent to start (the user can add more later — said explicitly)
-      3. Walk the chosen agent's credentials (the only required step)
-      4. Print exact next command (the agent's "try it" example)
-      5. Hint at `veto-agents account upgrade` for signed receipts later
-    """
+    """First run — gets the user to a working agent in the fewest possible
+    prompts. No email, no wallet, no LLM-provider choice up front. Just:
+    pick an agent → paste the key it needs → run."""
     banner.render(console, subtitle="AI agents that pay for things, governed by Veto")
 
-    console.print("[bold]Pick an agent to start[/bold]  [dim](you can add more anytime — `veto-agents install <name>`)[/dim]\n")
-    table = Table(show_header=False, box=None, pad_edge=False)
-    table.add_column("idx", style="dim", no_wrap=True)
-    table.add_column("name", style="bold cyan", no_wrap=True)
+    console.print(
+        "[bold]Welcome.[/bold]  Let's get you a working agent in about a minute.\n"
+        "[dim]Pick one to start. You can add more anytime.[/dim]\n"
+    )
+
+    table = Table(show_header=False, box=None, pad_edge=False, padding=(0, 2))
+    table.add_column("idx", style="dim", no_wrap=True, width=3)
+    table.add_column("name", style="bold cyan", no_wrap=True, min_width=10)
     table.add_column("what it does")
     for i, entry in enumerate(registry_module.REGISTRY, 1):
         table.add_row(str(i), entry.name, entry.one_line)
     console.print(table)
     console.print()
 
-    # Accept either a number or a name; default to media (the headline agent).
     choices = registry_module.all_names() + [str(i) for i in range(1, len(registry_module.REGISTRY) + 1)]
     raw = Prompt.ask("Choose", choices=choices, default="media", show_choices=False)
-    if raw.isdigit():
-        idx = int(raw) - 1
-        chosen = registry_module.REGISTRY[idx].name
-    else:
-        chosen = raw
+    chosen = registry_module.REGISTRY[int(raw) - 1].name if raw.isdigit() else raw
 
-    # Hand off to install — it does the credential walkthrough and
-    # registers the agent. No email / wallet / LLM choice required here.
+    # install walks the chosen agent's credentials (browser-open for each).
     ctx.invoke(install, name=chosen)
 
-    # Post-install nudge: how to upgrade for receipts.
+    # Soft closing line — signed receipts are a later step, not a precondition.
     console.print(
-        "\n[dim]Want signed receipts + on-chain governance for every agent action?\n"
-        "  Run: [cyan]veto-agents account upgrade[/cyan]  (email magic-link, takes 30s)\n"
-        "Otherwise, your agent runs locally and the receipts feed stays off.[/dim]\n"
+        "[dim]Heads up: until you run [cyan]veto-agents account upgrade[/cyan], your "
+        "agent runs locally without signed receipts. Upgrade takes 30 seconds via "
+        "email magic-link, anytime.[/dim]\n"
     )
 
 
@@ -138,18 +167,14 @@ def _first_run_wizard(ctx: typer.Context) -> None:
 
 @app.command()
 def setup() -> None:
-    """First-time setup. Pick an LLM brain, provision a wallet, register with Veto."""
-    console.print("\n[bold cyan]Veto Agents — first-run setup[/bold cyan]\n")
-    console.print(
-        "Veto governs every action your agents take. You stay in control. "
-        "This setup is a one-time thing.\n"
-    )
+    """Configure your account: sign in + pick an LLM brain + set policy posture."""
+    banner.render(console, subtitle="Account setup")
 
     cfg = cfg_module.load()
 
-    # 1. LLM provider — show full picker, then walk the credential setup
-    console.print("[bold]Step 1.[/bold] Pick the LLM brain your agents will use.")
-    console.print("  [dim]Each agent can also be overridden later via `veto-agents policy edit <agent>`.[/dim]\n")
+    # LLM provider — show full picker, then walk the credential setup
+    console.print("[bold]Pick the LLM brain your agents will use.[/bold]")
+    console.print("  [dim]You can change this per-agent later.[/dim]\n")
     provider_table = Table(show_header=False, box=None, pad_edge=False)
     provider_table.add_column("id", style="cyan bold", no_wrap=True)
     provider_table.add_column("label")
@@ -208,7 +233,7 @@ def setup() -> None:
         if main_state and main_state.get("api_key"):
             existing_email = main_state.get("email", "(unknown)")
             console.print(
-                f"\n[bold]Step 2.[/bold] Found existing Veto credentials from the main "
+                f"\n[bold]Existing account detected[/bold] — credentials from the main "
                 f"[cyan]veto[/cyan] CLI ([cyan]{existing_email}[/cyan])."
             )
             if Confirm.ask("  Reuse them? (skips the magic-link step)", default=True):
@@ -220,7 +245,7 @@ def setup() -> None:
                 cfg_module.save(cfg)
 
     if not cfg.api_key:
-        console.print("\n[bold]Step 2.[/bold] Sign in with email (magic link).")
+        console.print("\n[bold]Sign in[/bold]  [dim](magic link, no password)[/dim]")
         while True:
             email = Prompt.ask("Your email").strip().lower()
             if auth.is_valid_email(email):
@@ -268,10 +293,10 @@ def setup() -> None:
             f"agent_id [dim]{ready.agent_id}[/dim]"
         )
     else:
-        console.print(f"\n[bold]Step 2.[/bold] Already signed in (agent_id [dim]{cfg.agent_id}[/dim]).")
+        console.print(f"\n[dim]Already signed in (agent_id {cfg.agent_id}).[/dim]")
 
-    # 3. Policy posture (sensible default — most users keep "balanced")
-    console.print("\n[bold]Step 3.[/bold] Default policy posture for new agents.")
+    # Policy posture (sensible default — most users keep "balanced")
+    console.print("\n[bold]Policy posture[/bold]  [dim]for new agents (you can tweak per-agent later)[/dim]")
     console.print(
         "  [dim]strict = tight caps · balanced = sensible defaults · permissive = loose[/dim]"
     )

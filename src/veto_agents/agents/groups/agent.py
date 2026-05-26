@@ -153,9 +153,10 @@ def run_daemon(cfg, console: Console) -> None:
         )
     except ImportError:
         console.print(
-            "[red]✗[/red] python-telegram-bot isn't installed. Install the groups extra:\n"
-            "  [cyan]pipx inject veto-agents 'veto-agents[groups]'[/cyan]\n"
-            "or rebuild with: [cyan]pipx install --force 'veto-agents[groups]'[/cyan]"
+            "[red]✗[/red] The Groups agent needs extra libraries that aren't installed yet.\n"
+            "  Reinstall with the groups extras:\n\n"
+            "    [cyan]curl -fsSL https://raw.githubusercontent.com/veto-protocol/veto-agents/main/install.sh | bash[/cyan]\n\n"
+            "  (or run [dim]pipx install --force 'veto-agents[groups]'[/dim] if you prefer.)\n"
         )
         return
 
