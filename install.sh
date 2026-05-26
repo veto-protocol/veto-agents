@@ -94,7 +94,7 @@ fi
 printf '  %s…%s installing veto-agents' "$DIM" "$RESET"
 if ! pipx install --force "veto-agents[all]" >/dev/null 2>&1; then
   printf '\r\033[K'
-  err "Install failed. Try: ${CYAN}pipx install --force 'veto-agents[all]'${RESET}"
+  err "Install failed. Try the curl install once more — or paste this error into your coding agent (Claude Code, Codex, etc.) and let it debug."
 fi
 printf '\r\033[K' && ok "Installed."
 

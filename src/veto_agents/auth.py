@@ -61,20 +61,22 @@ _WEBMAIL = {
 
 
 def webmail_url_for(email: str) -> str | None:
-    """Compute the webmail URL for an email, no side effects.
-    Returns None only if the email has no `@`."""
+    """Return the webmail URL for *known* providers only (gmail, outlook,
+    proton, etc.). Returns None for corporate / custom domains — we used
+    to fall back to `https://<domain>`, but that opens the user's company
+    website, not their inbox, which is worse than doing nothing."""
     try:
         domain = email.split("@", 1)[1].strip().lower()
     except IndexError:
         return None
-    return _WEBMAIL.get(domain) or f"https://{domain}"
+    return _WEBMAIL.get(domain)
 
 
 def open_inbox_for(email: str) -> str | None:
-    """Compute the webmail URL and best-effort open it in a browser.
-    Always returns the URL when the email is valid — caller should
-    print it as a fallback for when the browser doesn't actually open
-    (headless sessions, missing default browser, sandboxing, etc.)."""
+    """Best-effort open the user's webmail in a browser. Only attempts
+    for known webmail providers — for corporate/custom domains we don't
+    open anything (the user knows where their email is). Returns the
+    URL we attempted to open, or None if the domain isn't recognized."""
     url = webmail_url_for(email)
     if url is None:
         return None
