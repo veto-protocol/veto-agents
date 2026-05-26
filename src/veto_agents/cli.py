@@ -31,7 +31,7 @@ from rich.prompt import Confirm, Prompt
 from rich.table import Table
 
 from . import __version__, config as cfg_module, credentials as creds_module, registry as registry_module
-from . import auth
+from . import auth, llm_providers
 from .funding import get_funding_target, render_funding_qr
 from .register import is_valid_evm_address
 
@@ -109,17 +109,59 @@ def setup() -> None:
 
     cfg = cfg_module.load()
 
-    # 1. LLM provider
-    console.print("[bold]Step 1.[/bold] Pick an LLM brain.")
-    console.print("  • [cyan]hermes[/cyan]  — open weights, hosted by Nous (default)")
-    console.print("  • [cyan]claude[/cyan]  — Anthropic, bring your own API key")
-    console.print("  • [cyan]gpt[/cyan]     — OpenAI, bring your own API key")
-    console.print("  • [cyan]custom[/cyan]  — any OpenAI-compatible endpoint\n")
-    cfg.llm_provider = Prompt.ask(
+    # 1. LLM provider — show full picker, then walk the credential setup
+    console.print("[bold]Step 1.[/bold] Pick the LLM brain your agents will use.")
+    console.print("  [dim]Each agent can also be overridden later via `veto-agents policy edit <agent>`.[/dim]\n")
+    provider_table = Table(show_header=False, box=None, pad_edge=False)
+    provider_table.add_column("id", style="cyan bold", no_wrap=True)
+    provider_table.add_column("label")
+    for prov in llm_providers.PROVIDERS.values():
+        provider_table.add_row(prov.name, prov.label)
+    console.print(provider_table)
+    console.print()
+
+    choice = Prompt.ask(
         "LLM provider",
-        choices=["hermes", "claude", "gpt", "custom"],
-        default=cfg.llm_provider,
+        choices=llm_providers.all_names(),
+        default=cfg.llm_provider if cfg.llm_provider in llm_providers.PROVIDERS else "hermes",
     )
+    cfg.llm_provider = choice
+    chosen = llm_providers.get(choice)
+    assert chosen is not None
+
+    # Endpoint + model: take provider defaults, unless `custom` (ask).
+    if choice == "custom":
+        endpoint = Prompt.ask("  Custom endpoint URL (OpenAI-compatible)", default=cfg.llm_endpoint or "").strip()
+        if endpoint:
+            cfg.llm_endpoint = endpoint
+        model = Prompt.ask("  Model name (e.g. llama3.1:70b)", default=cfg.llm_model or "").strip()
+        if model:
+            cfg.llm_model = model
+    else:
+        cfg.llm_endpoint = chosen.endpoint
+        cfg.llm_model = chosen.default_model
+        if chosen.notes:
+            console.print(f"  [dim]{chosen.notes}[/dim]")
+
+    # Collect API key for the chosen provider (skip if hosted or custom).
+    if chosen.env_var:
+        saved = creds_module.load().get(chosen.env_var)
+        env_override = os.environ.get(chosen.env_var)
+        if env_override:
+            console.print(f"  [green]✓[/green] {chosen.env_var} already set in shell env — using that.")
+        elif saved:
+            mask = saved[:6] + "…" + saved[-4:] if len(saved) > 12 else "saved"
+            console.print(f"  [green]✓[/green] {chosen.env_var} already saved ({mask}).")
+            if Confirm.ask("    Replace it?", default=False):
+                _prompt_for_llm_key(chosen)
+        else:
+            _prompt_for_llm_key(chosen)
+    elif choice == "hermes":
+        console.print(
+            f"  [dim]Using Veto's hosted free tier — no key needed for now. "
+            f"For higher rate limits later: get a key at {chosen.signup_url} and "
+            f"run `veto-agents creds set NOUS_API_KEY <key>`.[/dim]"
+        )
 
     # 2. Sign in. First check if the main `veto` CLI already signed this
     # user in — if so we just reuse those credentials, no second sign-in.
@@ -360,6 +402,36 @@ def install(
         f"\n[green]✓[/green] [bold]{name}[/bold] ready. Try:\n"
         f"  [cyan]veto-agents {name} \"{example_prompt}\"[/cyan]\n"
     )
+
+
+def _prompt_for_llm_key(provider: "llm_providers.LLMProvider") -> None:
+    """Open the LLM provider's signup page, prompt for the key, save it."""
+    assert provider.env_var is not None
+    console.print(f"\n  [bold]{provider.label}[/bold]")
+    if provider.notes:
+        console.print(f"  [dim]{provider.notes}[/dim]")
+    if provider.signup_url:
+        console.print(f"  [dim]Get a key at:[/dim] [cyan]{provider.signup_url}[/cyan]")
+        try:
+            import webbrowser
+            webbrowser.open(provider.signup_url)
+        except Exception:
+            pass
+
+    value = Prompt.ask(
+        f"  Paste your {provider.env_var} (or Enter to skip)",
+        default="",
+        password=False,
+    ).strip()
+    if value:
+        creds_module.set_value(provider.env_var, value)
+        console.print("  [green]✓[/green] Saved to ~/.veto-agents/credentials.yaml")
+    else:
+        console.print(
+            f"  [yellow]·[/yellow] Skipped. Agents using {provider.name} will fail "
+            f"until {provider.env_var} is set. Run "
+            f"`veto-agents creds set {provider.env_var} <key>` to add it later."
+        )
 
 
 def _walk_credentials(entry: "registry_module.AgentEntry", console: Console) -> None:
