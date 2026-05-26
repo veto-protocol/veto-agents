@@ -2,8 +2,14 @@
 
 When an agent action needs the user to be signed in and they aren't, the
 old behavior was to print "Run `veto-agents setup`" and exit. The new
-behavior asks Y/n and, on Y, runs setup right there so the user can
-continue without re-typing their original command afterward.
+behavior asks Y/n and, on Y, runs `veto-agents login` right there so
+the user can continue their original command afterward without retyping.
+
+We invoke the **login** subcommand specifically — not `setup` — because
+the user has already chosen an LLM/posture (or doesn't care to right
+now); they hit the gate because they need to authenticate to continue
+the action they were already executing. The full setup wizard would be
+overkill and would surface unrelated prompts.
 
 Implemented as a subprocess on the installed `veto-agents` binary
 rather than an in-process call to the Typer command, to avoid a
@@ -52,9 +58,9 @@ def require_signin(console: Console, cfg) -> object:
 
     console.print()
     try:
-        subprocess.run([binary, "setup"], check=False)
+        subprocess.run([binary, "login"], check=False)
     except KeyboardInterrupt:
-        console.print("\n  [dim]· Setup cancelled.[/dim]\n")
+        console.print("\n  [dim]· Sign-in cancelled.[/dim]\n")
         return cfg
 
     return cfg_module.load()

@@ -213,21 +213,170 @@ def _first_run_wizard(ctx: typer.Context) -> None:
     )
 
 
+# ─── login (extracted from setup) ─────────────────────────────────────────
+
+
+def _do_login(console: Console, cfg) -> bool:
+    """Sign-in flow: reuse main-CLI creds if present, else magic link.
+
+    Returns True if a sign-in action actually happened (so the caller can
+    render the success block). Returns False if the user was already
+    signed in, declined, or hit a recoverable error.
+
+    Mutates `cfg` in place and persists to disk on success.
+    """
+    if cfg.api_key:
+        # Already signed in — be terse, point to logout if they meant to switch.
+        console.print(
+            f"  [green]✓[/green] Already signed in as "
+            f"[cyan]{cfg.email or cfg.agent_id}[/cyan]."
+        )
+        console.print(
+            f"  [dim]Stored in {auth_creds.backend_kind()}. Run "
+            f"[/dim][cyan]veto-agents logout[/cyan][dim] to sign out and re-auth.[/dim]\n"
+        )
+        return False
+
+    # Path A: reuse credentials from the main `veto` CLI if installed.
+    main_state = cfg_module.read_main_cli_state()
+    if main_state and main_state.get("api_key"):
+        existing_email = main_state.get("email", "(unknown)")
+        console.print("\n[bold]Reuse your main Veto sign-in?[/bold]")
+        console.print(
+            f"  [dim]Detected credentials for[/dim] [cyan]{existing_email}[/cyan] "
+            "[dim]from the main `veto` CLI. Saying yes skips the magic-link "
+            "round-trip — same account, both CLIs.[/dim]"
+        )
+        if Confirm.ask("  Reuse them?", default=True):
+            cfg_module.import_from_main_cli(cfg, main_state)
+            cfg_module.save(cfg)
+            return True
+
+    # Path B: fresh magic-link sign-in. Same endpoints the main npm CLI
+    # uses (/api/v1/auth/email/start/ + /api/v1/auth/cli/poll/).
+    console.print("\n[bold]Sign in[/bold]  [dim](magic link, no password)[/dim]")
+    while True:
+        email = Prompt.ask("  Your email").strip().lower()
+        if auth.is_valid_email(email):
+            break
+        console.print("  [red]✗[/red] That doesn't look like a valid email. Try again.")
+
+    device_code = auth.generate_device_code()
+    try:
+        auth.start(api_base=cfg.veto_api_base, email=email, device_code=device_code)
+    except Exception as e:
+        console.print(f"  [red]✗[/red] Could not start sign-in: {e}")
+        console.print(
+            "  [dim]Retry with [/dim][cyan]veto-agents login[/cyan][dim] once "
+            "the connection's back.[/dim]"
+        )
+        return False
+
+    # Always print the webmail URL — `webbrowser.open()` can silently fail
+    # in too many environments (SSH, sandboxed, missing default browser).
+    webmail = auth.webmail_url_for(email)
+    auth.open_inbox_for(email)  # best-effort side effect
+    console.print(f"\n  [green]✓[/green] Magic link sent to [cyan]{email}[/cyan].")
+    console.print(
+        "  [dim]Click the button in the email to sign in. "
+        "Check spam if it doesn't arrive in ~30s — links come "
+        "from [/dim][cyan]auth@veto-ai.com[/cyan][dim].[/dim]"
+    )
+    if webmail:
+        console.print(f"  [dim]→ open[/dim] [cyan]{webmail}[/cyan]")
+    console.print(
+        "  [dim](Waiting up to 15 minutes. Press Ctrl-C to abort.)[/dim]\n"
+    )
+
+    try:
+        with console.status("[dim]waiting for the click…[/dim]", spinner="dots"):
+            ready = auth.poll_until_ready(
+                api_base=cfg.veto_api_base,
+                device_code=device_code,
+            )
+    except KeyboardInterrupt:
+        console.print(
+            "\n[yellow]·[/yellow] Aborted. Re-run [cyan]veto-agents login[/cyan] when ready."
+        )
+        return False
+    except TimeoutError as e:
+        console.print(f"\n[red]✗[/red] {e}")
+        return False
+    except Exception as e:
+        console.print(f"\n[red]✗[/red] Auth poll failed: {e}")
+        return False
+
+    cfg.api_key = ready.api_key
+    cfg.agent_id = ready.agent_id
+    cfg.client_id = ready.client_id
+    cfg.email = email
+    cfg_module.save(cfg)
+    return True
+
+
+@app.command()
+def login() -> None:
+    """Sign in to Veto via magic link.
+
+    Only does sign-in — does NOT touch your LLM provider choice or
+    policy posture. Use [cyan]veto-agents setup[/cyan] if you want the
+    full wizard. Idempotent: if you're already signed in, this is a
+    no-op (run [cyan]veto-agents logout[/cyan] to switch accounts).
+    """
+    banner.render(console, subtitle="Sign in")
+    cfg = cfg_module.load()
+    if _do_login(console, cfg):
+        _render_signed_in(console, cfg)
+
+
+@app.command()
+def logout() -> None:
+    """Sign out — wipes Veto credentials from the OS keychain."""
+    cfg = cfg_module.load()
+    if not cfg.api_key:
+        console.print("[dim]Not signed in.[/dim]")
+        return
+    email = cfg.email or "(unknown)"
+    auth_creds.clear()
+    # Strip from in-memory cfg + rewrite yaml without secrets.
+    cfg.api_key = cfg.agent_id = cfg.client_id = cfg.email = None
+    cfg_module.save(cfg)
+    console.print(f"  [green]✓[/green] Signed out [dim]({email})[/dim].")
+
+
 # ─── setup ────────────────────────────────────────────────────────────────
 
 
 @app.command()
 def setup() -> None:
-    """Configure your account: sign in + pick an LLM brain + set policy posture."""
+    """Configure your account: sign in + pick an LLM brain + set policy posture.
+
+    Sign-in runs FIRST so you can stop at any point and still have a
+    working account. LLM and posture come after — both are editable
+    later, sign-in is the only step that has a network round-trip.
+    """
     banner.render(console, subtitle="Account setup")
 
     cfg = cfg_module.load()
 
-    # LLM provider — numbered picker (same pattern as the agent picker on
+    # 1. Sign in.
+    if _do_login(console, cfg):
+        _render_signed_in(console, cfg)
+
+    if not cfg.api_key:
+        # Sign-in didn't complete — abort the rest of setup so we don't
+        # collect an LLM key without a Veto account behind it.
+        console.print(
+            "[yellow]·[/yellow] Skipped the rest of setup. Re-run "
+            "[cyan]veto-agents setup[/cyan] anytime."
+        )
+        return
+
+    # 2. LLM provider — numbered picker (same pattern as the agent picker on
     # first run). Users can type the number or the name; show_choices=False
     # keeps Rich from rendering an ugly [hermes/ollama/...] list at the
     # prompt, since we just showed the table above.
-    console.print("[bold]Pick the LLM brain your agents will use.[/bold]")
+    console.print("\n[bold]Pick the LLM brain your agents will use.[/bold]")
     console.print("  [dim]You can change this per-agent later.[/dim]\n")
     provider_table = Table(show_header=False, box=None, pad_edge=False, padding=(0, 2))
     provider_table.add_column("idx", style="dim", no_wrap=True, width=3)
@@ -293,98 +442,7 @@ def setup() -> None:
             f"pulled the model: [/dim][cyan]ollama pull {cfg.llm_model}[/cyan]"
         )
 
-    # 2. Sign in. First check if the main `veto` CLI already signed this
-    # user in — if so we just reuse those credentials, no second sign-in.
-    just_signed_in = False  # tracks whether we should render the success block
-    if not cfg.api_key:
-        main_state = cfg_module.read_main_cli_state()
-        if main_state and main_state.get("api_key"):
-            existing_email = main_state.get("email", "(unknown)")
-            console.print(
-                f"\n[bold]Reuse your main Veto sign-in?[/bold]"
-            )
-            console.print(
-                f"  [dim]Detected credentials for[/dim] [cyan]{existing_email}[/cyan] "
-                f"[dim]from the main `veto` CLI. Saying yes skips the magic-link "
-                f"round-trip — same account, both CLIs.[/dim]"
-            )
-            if Confirm.ask("  Reuse them?", default=True):
-                cfg = cfg_module.import_from_main_cli(cfg, main_state)
-                cfg_module.save(cfg)
-                just_signed_in = True
-
-    if not cfg.api_key:
-        console.print("\n[bold]Sign in[/bold]  [dim](magic link, no password)[/dim]")
-        while True:
-            email = Prompt.ask("Your email").strip().lower()
-            if auth.is_valid_email(email):
-                break
-            console.print("  [red]✗[/red] That doesn't look like a valid email. Try again.")
-
-        device_code = auth.generate_device_code()
-        try:
-            auth.start(api_base=cfg.veto_api_base, email=email, device_code=device_code)
-        except Exception as e:
-            console.print(f"  [red]✗[/red] Could not start sign-in: {e}")
-            console.print("  [dim]Retry with `veto-agents setup` once the connection's back.[/dim]")
-            return
-
-        # Magic-link wait UX: we always print the webmail URL, regardless of
-        # whether the browser auto-opens successfully. Headless terminals,
-        # SSH sessions, sandboxed environments, custom default-browser
-        # configs — too many ways the silent open fails. The visible URL is
-        # the user's guaranteed recourse.
-        webmail = auth.webmail_url_for(email)
-        auth.open_inbox_for(email)  # best-effort side effect
-        console.print(
-            f"\n  [green]✓[/green] Magic link sent to [cyan]{email}[/cyan]."
-        )
-        console.print(
-            "  [dim]Click the button in the email to sign in. "
-            "Check spam if it doesn't arrive in ~30s — links come "
-            "from [/dim][cyan]auth@veto-ai.com[/cyan][dim].[/dim]"
-        )
-        if webmail:
-            console.print(f"  [dim]→ open[/dim] [cyan]{webmail}[/cyan]")
-        console.print(
-            "  [dim](Waiting up to 15 minutes. Press Ctrl-C to abort.)[/dim]\n"
-        )
-
-        try:
-            with console.status("[dim]waiting for the click…[/dim]", spinner="dots"):
-                ready = auth.poll_until_ready(
-                    api_base=cfg.veto_api_base,
-                    device_code=device_code,
-                )
-        except KeyboardInterrupt:
-            console.print("\n[yellow]·[/yellow] Aborted. Re-run `veto-agents setup` when ready.")
-            return
-        except TimeoutError as e:
-            console.print(f"\n[red]✗[/red] {e}")
-            return
-        except Exception as e:
-            console.print(f"\n[red]✗[/red] Auth poll failed: {e}")
-            return
-
-        cfg.api_key = ready.api_key
-        cfg.agent_id = ready.agent_id
-        cfg.client_id = ready.client_id
-        cfg.email = email
-        # Persist creds NOW so the keychain is updated even if the user
-        # quits before the rest of setup finishes.
-        cfg_module.save(cfg)
-        just_signed_in = True
-    else:
-        # Already signed in (came in with credentials); say so quietly.
-        console.print(
-            f"\n[dim]Already signed in as [cyan]{cfg.email or cfg.agent_id}[/cyan] · "
-            f"stored in {auth_creds.backend_kind()}.[/dim]"
-        )
-
-    if just_signed_in:
-        _render_signed_in(console, cfg)
-
-    # Policy posture — numbered picker for consistency with the LLM picker.
+    # 3. Policy posture — numbered picker for consistency with the LLM picker.
     console.print("\n[bold]Policy posture[/bold]  [dim]for new agents (you can tweak per-agent later)[/dim]\n")
     postures = [
         ("strict",     "tight caps · small allowlist · escalate on anything new"),
