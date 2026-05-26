@@ -125,11 +125,50 @@ fi
 
 ok "veto-agents $($(command -v veto-agents) --version 2>/dev/null | awk '{print $2}')"
 
+# ── Make sure veto-agents is on the user's interactive-shell PATH ──
+# `pipx ensurepath` writes to the user's shell rc (~/.zshrc on macOS by
+# default, ~/.bashrc on Linux). We always run it — idempotent if already
+# done — so the next shell session has the binary on PATH.
+step "4. Wiring PATH"
+
+pipx ensurepath >/dev/null 2>&1 || true
+
+# Detect the user's likely interactive shell rc so we can give a precise
+# "source this file" hint. zsh on macOS, bash elsewhere is the realistic
+# default; honor $SHELL if it's set.
+SHELL_NAME="$(basename "${SHELL:-bash}")"
+case "$SHELL_NAME" in
+  zsh)  RC_FILE="$HOME/.zshrc" ;;
+  bash) RC_FILE="$HOME/.bashrc" ;;
+  *)    RC_FILE="" ;;
+esac
+
+# Is ~/.local/bin already on the PATH that the user's interactive shell
+# will see? We test by spawning a fresh login shell and grepping its PATH.
+ON_PATH=false
+if "$SHELL" -l -c 'echo "$PATH"' 2>/dev/null | tr ':' '\n' | grep -qx "$HOME/.local/bin"; then
+  ON_PATH=true
+fi
+
+if $ON_PATH; then
+  ok "~/.local/bin already on your shell PATH"
+  NEXT_HINT="${CYAN}veto-agents${RESET}"
+else
+  ok "Added ~/.local/bin to your shell PATH (via pipx ensurepath)"
+  if [ -n "$RC_FILE" ] && [ -f "$RC_FILE" ]; then
+    warn "Open a new terminal tab, OR run: ${CYAN}source $RC_FILE${RESET}"
+    NEXT_HINT="${CYAN}source $RC_FILE && veto-agents${RESET}"
+  else
+    warn "Open a new terminal tab so the PATH update takes effect."
+    NEXT_HINT="${CYAN}veto-agents${RESET}  ${DIM}(open a new tab first)${RESET}"
+  fi
+fi
+
 # ── First-run nudge ───────────────────────────────────────────────
 cat <<EOF
 
 ${BOLD}Next:${RESET}
-  ${CYAN}veto-agents${RESET}                          # walks you through first-time setup
+  ${NEXT_HINT}                          # walks you through first-time setup
   ${CYAN}veto-agents install media${RESET}            # add your first agent
   ${CYAN}veto-agents media "<your prompt>"${RESET}    # run it
 
