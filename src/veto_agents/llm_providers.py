@@ -35,12 +35,21 @@ class LLMProvider:
 PROVIDERS: dict[str, LLMProvider] = {
     "hermes": LLMProvider(
         name="hermes",
-        label="Hermes (Nous, open weights, hosted free tier)",
-        env_var=None,  # Veto-hosted via Nous Portal — no user key needed for v0
+        label="Hermes via Nous Portal (open weights, free tier with signup)",
+        env_var="NOUS_API_KEY",
         signup_url="https://portal.nousresearch.com",
         endpoint="https://inference-api.nousresearch.com/v1",
         default_model="hermes-3-llama-3.1-405b",
-        notes="Default. Open weights. Free hosted tier; bring your own key for higher rate limits.",
+        notes="Open weights. Free tier available — signup at Nous Portal still gets you a key.",
+    ),
+    "ollama": LLMProvider(
+        name="ollama",
+        label="Self-hosted via Ollama (no API key, but you run the inference)",
+        env_var=None,
+        signup_url="https://ollama.com/download",
+        endpoint="http://localhost:11434/v1",
+        default_model="hermes3:405b",
+        notes="Runs locally — no key, no rate limit, but you need a machine with the GPU/RAM for the model. `ollama pull hermes3:405b` first.",
     ),
     "claude": LLMProvider(
         name="claude",

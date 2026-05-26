@@ -156,11 +156,11 @@ def setup() -> None:
                 _prompt_for_llm_key(chosen)
         else:
             _prompt_for_llm_key(chosen)
-    elif choice == "hermes":
+    elif choice == "ollama":
         console.print(
-            f"  [dim]Using Veto's hosted free tier — no key needed for now. "
-            f"For higher rate limits later: get a key at {chosen.signup_url} and "
-            f"run `veto-agents creds set NOUS_API_KEY <key>`.[/dim]"
+            f"  [dim]Using a local Ollama endpoint at {cfg.llm_endpoint}. "
+            f"Make sure Ollama is running ({chosen.signup_url}) and you've "
+            f"pulled the model: [/dim][cyan]ollama pull {cfg.llm_model}[/cyan]"
         )
 
     # 2. Sign in. First check if the main `veto` CLI already signed this
