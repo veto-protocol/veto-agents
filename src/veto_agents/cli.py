@@ -172,22 +172,38 @@ def setup() -> None:
 
     cfg = cfg_module.load()
 
-    # LLM provider — show full picker, then walk the credential setup
+    # LLM provider — numbered picker (same pattern as the agent picker on
+    # first run). Users can type the number or the name; show_choices=False
+    # keeps Rich from rendering an ugly [hermes/ollama/...] list at the
+    # prompt, since we just showed the table above.
     console.print("[bold]Pick the LLM brain your agents will use.[/bold]")
     console.print("  [dim]You can change this per-agent later.[/dim]\n")
-    provider_table = Table(show_header=False, box=None, pad_edge=False)
+    provider_table = Table(show_header=False, box=None, pad_edge=False, padding=(0, 2))
+    provider_table.add_column("idx", style="dim", no_wrap=True, width=3)
     provider_table.add_column("id", style="cyan bold", no_wrap=True)
     provider_table.add_column("label")
-    for prov in llm_providers.PROVIDERS.values():
-        provider_table.add_row(prov.name, prov.label)
+    provider_list = list(llm_providers.PROVIDERS.values())
+    for i, prov in enumerate(provider_list, 1):
+        provider_table.add_row(str(i), prov.name, prov.label)
     console.print(provider_table)
     console.print()
 
-    choice = Prompt.ask(
-        "LLM provider",
-        choices=llm_providers.all_names(),
-        default=cfg.llm_provider if cfg.llm_provider in llm_providers.PROVIDERS else "hermes",
+    default_name = (
+        cfg.llm_provider if cfg.llm_provider in llm_providers.PROVIDERS else "hermes"
     )
+    default_idx = next(
+        (str(i) for i, p in enumerate(provider_list, 1) if p.name == default_name), "1"
+    )
+    pick_choices = llm_providers.all_names() + [
+        str(i) for i in range(1, len(provider_list) + 1)
+    ]
+    raw = Prompt.ask(
+        f"Pick one [dim](1-{len(provider_list)} or name)[/dim]",
+        choices=pick_choices,
+        default=default_idx,
+        show_choices=False,
+    )
+    choice = provider_list[int(raw) - 1].name if raw.isdigit() else raw
     cfg.llm_provider = choice
     chosen = llm_providers.get(choice)
     assert chosen is not None
@@ -295,15 +311,35 @@ def setup() -> None:
     else:
         console.print(f"\n[dim]Already signed in (agent_id {cfg.agent_id}).[/dim]")
 
-    # Policy posture (sensible default — most users keep "balanced")
-    console.print("\n[bold]Policy posture[/bold]  [dim]for new agents (you can tweak per-agent later)[/dim]")
-    console.print(
-        "  [dim]strict = tight caps · balanced = sensible defaults · permissive = loose[/dim]"
+    # Policy posture — numbered picker for consistency with the LLM picker.
+    console.print("\n[bold]Policy posture[/bold]  [dim]for new agents (you can tweak per-agent later)[/dim]\n")
+    postures = [
+        ("strict",     "tight caps · small allowlist · escalate on anything new"),
+        ("balanced",   "sensible defaults · most users keep this"),
+        ("permissive", "loose · for trusted agents, expect more dollars to flow"),
+    ]
+    posture_table = Table(show_header=False, box=None, pad_edge=False, padding=(0, 2))
+    posture_table.add_column("idx", style="dim", no_wrap=True, width=3)
+    posture_table.add_column("id", style="cyan bold", no_wrap=True)
+    posture_table.add_column("label")
+    for i, (name, label) in enumerate(postures, 1):
+        posture_table.add_row(str(i), name, label)
+    console.print(posture_table)
+    console.print()
+
+    default_posture = cfg.policy_posture if cfg.policy_posture in {p[0] for p in postures} else "balanced"
+    default_posture_idx = next(
+        str(i) for i, (n, _) in enumerate(postures, 1) if n == default_posture
     )
-    cfg.policy_posture = Prompt.ask(
-        "Posture",
-        choices=["strict", "balanced", "permissive"],
-        default=cfg.policy_posture,
+    posture_choices = [p[0] for p in postures] + [str(i) for i in range(1, len(postures) + 1)]
+    raw_posture = Prompt.ask(
+        f"Pick one [dim](1-{len(postures)} or name)[/dim]",
+        choices=posture_choices,
+        default=default_posture_idx,
+        show_choices=False,
+    )
+    cfg.policy_posture = (
+        postures[int(raw_posture) - 1][0] if raw_posture.isdigit() else raw_posture
     )
 
     cfg_module.save(cfg)
