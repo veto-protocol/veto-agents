@@ -82,12 +82,17 @@ def run(prompt: str, *, cfg, console: Console, auto_confirm: bool = False) -> No
     try:
         result = client.authorize(
             agent_id=cfg.agent_id,
-            action_type="api_call",
+            action="tool_execution",
             merchant="api.anthropic.com",
             amount=EST_REPLY_COST_USD,
             currency="USD",
             description=f"groups one-shot: {prompt[:120]}",
-            context={"agent_type": "groups", "tool_name": "anthropic.claude", "mode": "cli"},
+            context={
+                "source": "veto-agents-groups",
+                "intent": prompt,
+                "tool_name": "anthropic.claude",
+                "mode": "cli",
+            },
         )
     except Exception as e:
         console.print(f"  [red]✗ Veto authorize failed:[/red] {e}")
@@ -216,13 +221,14 @@ def run_daemon(cfg, console: Console) -> None:
         try:
             result = veto_client.authorize(
                 agent_id=cfg.agent_id,
-                action_type="api_call",
+                action="tool_execution",
                 merchant="api.anthropic.com",
                 amount=EST_REPLY_COST_USD,
                 currency="USD",
                 description=f"groups reply: {question[:80]}",
                 context={
-                    "agent_type": "groups",
+                    "source": "veto-agents-groups",
+                    "intent": question,
                     "tool_name": "anthropic.claude",
                     "chat_id": str(chat_id),
                     "telegram_user": str(msg.from_user.id) if msg.from_user else "",

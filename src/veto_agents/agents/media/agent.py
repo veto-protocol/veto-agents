@@ -178,13 +178,14 @@ def run(prompt: str, *, cfg, console: Console, auto_confirm: bool = False) -> No
             try:
                 result: AuthorizeResult = client.authorize(
                     agent_id=agent_id,
-                    action_type="api_call",
+                    action="tool_execution",
                     merchant=s.merchant,
                     amount=s.est_usd,
                     currency="USD",
                     description=f"{s.tool_name}: {prompt[:120]}",
                     context={
-                        "agent_type": "media",
+                        "source": "veto-agents-media",
+                        "intent": prompt,
                         "tool_name": s.tool_name,
                         "step": i,
                         "of": len(steps),

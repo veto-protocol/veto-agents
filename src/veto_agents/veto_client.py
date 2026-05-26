@@ -2,7 +2,7 @@
 
 Every paid tool call goes through this. The contract:
 
-  client.authorize(agent_id, action_type, merchant, amount, currency, description,
+  client.authorize(agent_id, action, merchant, amount, currency, description,
                    context=...)
   → AuthorizeResult(verdict, reason_codes, receipt_url, receipt_jwt)
 
@@ -41,25 +41,34 @@ class VetoClient:
         self,
         *,
         agent_id: str,
-        action_type: str,
+        action: str,
         merchant: str,
         amount: float,
         currency: str = "USD",
         description: str = "",
-        context: dict[str, Any] | None = None,
+        context: dict[str, Any] | str | None = None,
     ) -> AuthorizeResult:
+        """Call POST /api/v1/authorize/.
+
+        Wire format matches what the main `veto` (npm) CLI sends:
+        - Header `X-Veto-API-Key` (NOT `Authorization: Bearer ...`).
+        - Body field `action` (NOT `action_type`); accepted values are
+          `payment`, `crypto_transfer`, `tool_execution`.
+        - `context` may be a string or a dict; the backend normalizes
+          either shape so callers can stay loose.
+        """
         payload = {
             "agent_id": agent_id,
-            "action_type": action_type,
+            "action": action,
             "merchant": merchant,
             "amount": amount,
             "currency": currency,
             "description": description,
-            "context": context or {},
+            "context": context if context is not None else {},
         }
         headers = {"Content-Type": "application/json"}
         if self.api_key:
-            headers["Authorization"] = f"Bearer {self.api_key}"
+            headers["X-Veto-API-Key"] = self.api_key
 
         r = self._client.post(f"{self.api_base}/authorize/", json=payload, headers=headers)
         r.raise_for_status()

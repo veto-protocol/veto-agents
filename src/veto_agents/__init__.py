@@ -3,4 +3,4 @@
 Hermes-core. Governed by Veto. Plan-then-execute by design.
 """
 
-__version__ = "0.0.17"
+__version__ = "0.0.18"
