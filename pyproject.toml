@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "veto-agents"
-version = "0.0.18"
+version = "0.0.19"
 description = "AI agents that pay for things on your behalf, with the safety built in. Hermes-core, governed by Veto."
 readme = "README.md"
 requires-python = ">=3.10"

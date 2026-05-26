@@ -115,16 +115,19 @@ def run(prompt: str, *, cfg, console: Console, auto_confirm: bool = False) -> No
     # 2. Render plan + estimate
     total = _render_plan(steps, console)
 
-    # 2.5. Pre-flight balance check — refuse if treasury can't cover the plan.
-    # Skip the on-chain check if we don't have credentials (covered by the
-    # later authorize call anyway).
-    if cfg.api_key and cfg.agent_id:
+    # 2.5. Pre-flight balance check — only when the user has actually set
+    # up a Veto-governed wallet. Without one there's no treasury to check
+    # against: tools are paid for with the user's own provider keys
+    # (e.g. REPLICATE_API_TOKEN), so we just defer to authorize and let
+    # the user pay their provider directly. Once `veto-agents wallet setup`
+    # has run, this check enforces the on-chain budget.
+    if cfg.api_key and cfg.agent_id and cfg.wallet_address:
         import time as _time
 
         from ...funding import get_funding_target
         from ...wallet_view import compute_stats
 
-        target = get_funding_target(cfg.wallet_address or "")
+        target = get_funding_target(cfg.wallet_address)
         stats = compute_stats(
             treasury=target.address,
             chain=target.chain,
