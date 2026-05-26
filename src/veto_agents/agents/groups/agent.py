@@ -60,10 +60,11 @@ def run(prompt: str, *, cfg, console: Console, auto_confirm: bool = False) -> No
     Falls through to a single authorized Anthropic call + prints the reply.
     """
     if not (cfg.api_key and cfg.agent_id):
-        console.print(
-            "[red]✗[/red] Not signed in. Run [cyan]veto-agents setup[/cyan]."
-        )
-        return
+        from ...auth_gate import require_signin
+
+        cfg = require_signin(console, cfg)
+        if not (cfg.api_key and cfg.agent_id):
+            return
 
     api_key = get_credential("ANTHROPIC_API_KEY") or get_credential("OPENAI_API_KEY") or get_credential("NOUS_API_KEY")
     if not api_key:
@@ -119,8 +120,11 @@ def run(prompt: str, *, cfg, console: Console, auto_confirm: bool = False) -> No
 def run_daemon(cfg, console: Console) -> None:
     """Long-running Telegram bot. Started by `veto-agents groups run --daemon`."""
     if not (cfg.api_key and cfg.agent_id):
-        console.print("[red]✗[/red] Not signed in. Run [cyan]veto-agents setup[/cyan].")
-        return
+        from ...auth_gate import require_signin
+
+        cfg = require_signin(console, cfg)
+        if not (cfg.api_key and cfg.agent_id):
+            return
 
     bot_token = get_credential("TELEGRAM_BOT_TOKEN")
     if not bot_token:

@@ -161,11 +161,11 @@ def run(prompt: str, *, cfg, console: Console, auto_confirm: bool = False) -> No
     # Auth is required — every action signs through Veto so the receipt
     # trail stays complete. No anonymous escape hatch.
     if not (cfg.api_key and cfg.agent_id):
-        console.print(
-            "[red]✗[/red] Not signed in. Run [cyan]veto-agents setup[/cyan] to "
-            "sign in via magic-link (~30s)."
-        )
-        return
+        from ...auth_gate import require_signin
+
+        cfg = require_signin(console, cfg)
+        if not (cfg.api_key and cfg.agent_id):
+            return
     client = VetoClient(api_base=cfg.veto_api_base, api_key=cfg.api_key)
     agent_id = cfg.agent_id
 

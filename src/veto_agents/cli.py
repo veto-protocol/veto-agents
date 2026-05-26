@@ -837,12 +837,13 @@ def wallet_revoke_veto() -> None:
 
 def _render_wallet_dashboard() -> None:
     """The headline `veto-agents wallet` view — balance + per-agent + recent."""
+    from .auth_gate import require_signin
+
     cfg = cfg_module.load()
     if not cfg.api_key:
-        console.print(
-            "[yellow]·[/yellow] Not signed in. Run [cyan]veto-agents setup[/cyan] first."
-        )
-        return
+        cfg = require_signin(console, cfg)
+        if not cfg.api_key:
+            return
 
     from .wallet_view import (
         aggregate_receipts,
