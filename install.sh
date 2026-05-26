@@ -95,10 +95,13 @@ fi
 # (Adds python-telegram-bot for Groups, anthropic for Media/Groups replies, etc.)
 printf '  %s…%s installing veto-agents' "$DIM" "$RESET"
 if ! pipx install --force "veto-agents[all]" >/dev/null 2>&1; then
-  printf '\r'
+  printf '\r\033[K'
   err "Install failed. Try: ${CYAN}pipx install --force 'veto-agents[all]'${RESET}"
 fi
-printf '\r' && ok "veto-agents installed"
+# \r + \033[K clears the in-place progress line before printing the ✓ — otherwise
+# the trailing chars of "installing veto-agents" peek through (it's longer than
+# "installed").
+printf '\r\033[K' && ok "veto-agents installed"
 
 # Ensure ~/.local/bin (or pipx's chosen location) is on PATH for future shells.
 pipx ensurepath >/dev/null 2>&1 || true
