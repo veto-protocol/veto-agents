@@ -158,12 +158,14 @@ def run(prompt: str, *, cfg, console: Console, auto_confirm: bool = False) -> No
             return
 
     # 4. Authorize + execute each step
-    if not cfg.api_key or not cfg.agent_id:
+    # Auth is required — every action signs through Veto so the receipt
+    # trail stays complete. No anonymous escape hatch.
+    if not (cfg.api_key and cfg.agent_id):
         console.print(
-            "[red]✗[/red] Not registered with Veto. Run [cyan]veto-agents setup[/cyan] first."
+            "[red]✗[/red] Not signed in. Run [cyan]veto-agents setup[/cyan] to "
+            "sign in via magic-link (~30s)."
         )
         return
-
     client = VetoClient(api_base=cfg.veto_api_base, api_key=cfg.api_key)
     agent_id = cfg.agent_id
 
@@ -171,6 +173,8 @@ def run(prompt: str, *, cfg, console: Console, auto_confirm: bool = False) -> No
     try:
         for i, s in enumerate(steps, 1):
             console.print(f"[bold cyan]Step {i}/{len(steps)}[/bold cyan] · {s.label}")
+
+            # Every spend authorizes through Veto. No bypass.
             try:
                 result: AuthorizeResult = client.authorize(
                     agent_id=agent_id,
@@ -188,55 +192,51 @@ def run(prompt: str, *, cfg, console: Console, auto_confirm: bool = False) -> No
                 )
             except Exception as e:
                 console.print(f"  [red]✗ Veto authorize failed:[/red] {e}")
-                console.print("  [dim]Stopping. No paid action taken for this step.[/dim]\n")
+                console.print("  [dim]Stopping. No paid action taken.[/dim]\n")
                 return
 
-            if result.verdict == "allow":
+            if result.verdict == "deny":
                 console.print(
-                    f"  [green]✓ allowed[/green] by Veto"
-                    + (f" · receipt {result.receipt_url}" if result.receipt_url else "")
+                    f"  [red]✗ denied by Veto[/red] · reason: "
+                    f"{', '.join(result.reason_codes) or 'policy'}"
                 )
+                return
+            if result.verdict == "escalate":
+                console.print(
+                    f"  [yellow]· escalated[/yellow] — needs your approval. "
+                    f"Receipt: {result.receipt_url}"
+                )
+                return
+            console.print(
+                f"  [green]✓ allowed[/green] by Veto"
+                + (f" · receipt {result.receipt_url}" if result.receipt_url else "")
+            )
 
-                # Execute the real tool call. v0.0.3: only replicate.image_gen
-                # is real; Runway video + ElevenLabs voice still stubs until
-                # we wire each. The agent transparently reports which.
-                if s.tool_name == "replicate.image_gen":
-                    tool_result = replicate_image.generate(prompt=prompt)
-                    actual = tool_result.actual_cost_usd
-                    actual_total += actual
-                    if tool_result.ok:
-                        console.print(
-                            f"  [green]✓ done[/green] · actual ${actual:.4f} "
-                            f"· file [cyan]{tool_result.output_path}[/cyan]"
-                        )
-                    else:
-                        console.print(
-                            f"  [red]✗ tool failed[/red] (Veto already authorized + recorded)"
-                        )
-                        console.print(f"  [dim]{tool_result.error}[/dim]")
-                        return
-                else:
-                    # Runway video / ElevenLabs voice still stubbed in v0.0.3
-                    actual = s.est_usd
-                    actual_total += actual
+            # Tool execution
+            if s.tool_name == "replicate.image_gen":
+                tool_result = replicate_image.generate(prompt=prompt)
+                actual = tool_result.actual_cost_usd
+                actual_total += actual
+                if tool_result.ok:
                     console.print(
-                        f"  [yellow]·[/yellow] tool call stubbed for [dim]{s.tool_name}[/dim] "
-                        f"(coming v0.0.4) · est-cost ${actual:.2f}"
+                        f"  [green]✓ done[/green] · actual ${actual:.4f} "
+                        f"· file [cyan]{tool_result.output_path}[/cyan]"
                     )
-            elif result.verdict == "deny":
+                else:
+                    console.print(f"  [red]✗ tool failed[/red]")
+                    console.print(f"  [dim]{tool_result.error}[/dim]")
+                    return
+            else:
+                # Runway video / ElevenLabs voice still stubbed
+                actual = s.est_usd
+                actual_total += actual
                 console.print(
-                    f"  [red]✗ denied[/red] · reason: {', '.join(result.reason_codes) or 'policy'}"
+                    f"  [yellow]·[/yellow] tool call stubbed for [dim]{s.tool_name}[/dim] "
+                    f"· est-cost ${actual:.2f}"
                 )
-                console.print("  Stopping. No further steps will execute.\n")
-                return
-            else:  # escalate
-                console.print(
-                    f"  [yellow]· escalated[/yellow] — needs your approval. Receipt: {result.receipt_url}"
-                )
-                console.print("  Approve in the dashboard, then re-run.\n")
-                return
     finally:
-        client.close()
+        if client is not None:
+            client.close()
 
     console.print(
         f"\n[green]✓ Done.[/green] Total spent: [bold]${actual_total:.2f}[/bold] "

@@ -31,7 +31,7 @@ from rich.prompt import Confirm, Prompt
 from rich.table import Table
 
 from . import __version__, config as cfg_module, credentials as creds_module, registry as registry_module
-from . import auth, llm_providers
+from . import auth, banner, llm_providers, wallet_setup as wallet_setup_module
 from .funding import get_funding_target, render_funding_qr
 from .register import is_valid_evm_address
 
@@ -68,31 +68,69 @@ def _root(
         raise typer.Exit(0)
     if ctx.invoked_subcommand is None:
         cfg = cfg_module.load()
-        # First run? Auto-launch setup so the user has a path forward.
-        if not cfg.api_key:
-            console.print(
-                "\n[bold cyan]Welcome to Veto Agents.[/bold cyan]  "
-                "[dim]AI agents that pay for things, with the safety built in.[/dim]\n"
-            )
-            console.print("Looks like this is your first run. Let's get you set up.\n")
-            ctx.invoke(setup)
-            console.print(
-                "\n[bold]Now install your first agent:[/bold]\n"
-                "  [cyan]veto-agents install media[/cyan]       generates images + video + voice\n"
-                "  [cyan]veto-agents install build[/cyan]       deploys your code on cheap infra\n"
-                "  [cyan]veto-agents install research[/cyan]    deep research with paid sources\n"
-                "  [cyan]veto-agents install inbox[/cyan]       email triage + scheduling\n"
-            )
+        # First run? Launch the agent-picker wizard — pick one agent to start,
+        # no email/wallet/magic-link required. Inspired by Franklin's
+        # "start free, upgrade by funding" pattern: get the user to a working
+        # agent in the fewest possible steps.
+        if not cfg.installed_agents:
+            _first_run_wizard(ctx)
             return
-        # Signed in: show a brief status + help.
-        masked = (cfg.api_key[:12] + "…" + cfg.api_key[-4:]) if cfg.api_key else "—"
-        installed = ", ".join(cfg.installed_agents) if cfg.installed_agents else "[dim]none yet[/dim]"
+        # Returning user with agents installed: show status + help.
+        installed = ", ".join(cfg.installed_agents)
+        signed_in = bool(cfg.api_key)
+        status_line = (
+            f"signed in · receipts on" if signed_in
+            else "[yellow]local mode[/yellow] · no signed receipts yet  "
+                 "[dim](upgrade: veto-agents account upgrade)[/dim]"
+        )
         console.print(
-            f"\n[bold]veto-agents[/bold] {__version__} · signed in · "
-            f"agents installed: {installed}\n"
-            f"[dim]api_key={masked}  state={cfg_module.state_dir()}[/dim]\n"
+            f"\n[bold]veto-agents[/bold] {__version__}  ·  agents: [cyan]{installed}[/cyan]\n"
+            f"[dim]status:[/dim] {status_line}\n"
         )
         console.print(ctx.get_help())
+
+
+def _first_run_wizard(ctx: typer.Context) -> None:
+    """The fresh-install onboarding. ZERO required prompts before useful work.
+
+    Flow:
+      1. Banner
+      2. Pick ONE agent to start (the user can add more later — said explicitly)
+      3. Walk the chosen agent's credentials (the only required step)
+      4. Print exact next command (the agent's "try it" example)
+      5. Hint at `veto-agents account upgrade` for signed receipts later
+    """
+    banner.render(console, subtitle="AI agents that pay for things, governed by Veto")
+
+    console.print("[bold]Pick an agent to start[/bold]  [dim](you can add more anytime — `veto-agents install <name>`)[/dim]\n")
+    table = Table(show_header=False, box=None, pad_edge=False)
+    table.add_column("idx", style="dim", no_wrap=True)
+    table.add_column("name", style="bold cyan", no_wrap=True)
+    table.add_column("what it does")
+    for i, entry in enumerate(registry_module.REGISTRY, 1):
+        table.add_row(str(i), entry.name, entry.one_line)
+    console.print(table)
+    console.print()
+
+    # Accept either a number or a name; default to media (the headline agent).
+    choices = registry_module.all_names() + [str(i) for i in range(1, len(registry_module.REGISTRY) + 1)]
+    raw = Prompt.ask("Choose", choices=choices, default="media", show_choices=False)
+    if raw.isdigit():
+        idx = int(raw) - 1
+        chosen = registry_module.REGISTRY[idx].name
+    else:
+        chosen = raw
+
+    # Hand off to install — it does the credential walkthrough and
+    # registers the agent. No email / wallet / LLM choice required here.
+    ctx.invoke(install, name=chosen)
+
+    # Post-install nudge: how to upgrade for receipts.
+    console.print(
+        "\n[dim]Want signed receipts + on-chain governance for every agent action?\n"
+        "  Run: [cyan]veto-agents account upgrade[/cyan]  (email magic-link, takes 30s)\n"
+        "Otherwise, your agent runs locally and the receipts feed stays off.[/dim]\n"
+    )
 
 
 # ─── setup ────────────────────────────────────────────────────────────────
@@ -232,28 +270,11 @@ def setup() -> None:
     else:
         console.print(f"\n[bold]Step 2.[/bold] Already signed in (agent_id [dim]{cfg.agent_id}[/dim]).")
 
-    # 3. Funding wallet address (the one you'll send USDC FROM)
-    console.print("\n[bold]Step 3.[/bold] The wallet you'll fund your agent from.")
-    if cfg.wallet_address:
-        console.print(f"  Existing: [green]{cfg.wallet_address}[/green]")
-    else:
-        console.print(
-            "  Paste an EVM address (Phantom/Metamask/Coinbase Wallet/Rabby — anything you control). "
-            "  This is just so we know which deposit on Base Sepolia is yours."
-        )
-        while True:
-            addr = Prompt.ask("Your wallet address (0x…)", default="").strip()
-            if not addr:
-                console.print("  [yellow]·[/yellow] Skipped. You can paste it later via `veto-agents wallet set <addr>`.")
-                break
-            if is_valid_evm_address(addr):
-                cfg.wallet_address = addr
-                console.print(f"  [green]✓[/green] {addr}")
-                break
-            console.print("  [red]✗[/red] Not a valid EVM address. Try again.")
-
-    # 4. Policy posture
-    console.print("\n[bold]Step 4.[/bold] Default policy posture for new agents.")
+    # 3. Policy posture (sensible default — most users keep "balanced")
+    console.print("\n[bold]Step 3.[/bold] Default policy posture for new agents.")
+    console.print(
+        "  [dim]strict = tight caps · balanced = sensible defaults · permissive = loose[/dim]"
+    )
     cfg.policy_posture = Prompt.ask(
         "Posture",
         choices=["strict", "balanced", "permissive"],
@@ -262,27 +283,15 @@ def setup() -> None:
 
     cfg_module.save(cfg)
 
-    # 5. Fund your agent — show QR code for the treasury contract
-    if cfg.api_key:
-        target = get_funding_target(cfg.wallet_address)
-        console.print("\n[bold]Step 5.[/bold] Fund your agent.")
-        console.print(
-            f"  Send [bold cyan]USDC on {target.chain}[/bold cyan] to the address below. "
-            "Scan with your phone wallet, or copy the address."
-        )
-        console.print()
-        console.print(render_funding_qr(target))
-        console.print(f"  Address: [cyan]{target.address}[/cyan]")
-        console.print(f"  Chain:   {target.chain} (chain id {target.chain_id})")
-        console.print(f"  Token:   USDC ({target.token_contract})")
-        console.print(
-            "\n  [dim]Mainnet + multi-chain bridges land in v0.4. For now, anything "
-            "you send is testnet USDC.[/dim]"
-        )
-
+    # Done. Wallet setup is opt-in via `veto-agents wallet setup` — we don't
+    # ask the user to send money to anything before they've decided they like
+    # the product. Less scary, better funnel.
     console.print(
-        f"\n[green]✓[/green] Setup complete. State at [dim]{cfg_module.state_dir()}[/dim]\n"
-        f"Next: [cyan]veto-agents list[/cyan] to browse the agent catalog.\n"
+        f"\n[green]✓[/green] Signed in. State at [dim]{cfg_module.state_dir()}[/dim]\n\n"
+        f"[bold]Next:[/bold]\n"
+        f"  [cyan]veto-agents install media[/cyan]   add your first agent\n"
+        f"  [cyan]veto-agents wallet setup[/cyan]    enable on-chain spending governance "
+        f"[dim](optional, do this when you're ready to fund)[/dim]\n"
     )
 
 
@@ -337,20 +346,9 @@ def install(
 
     cfg = cfg_module.load()
 
-    # ── Guardrail: must be signed in first ────────────────────
-    if not cfg.api_key:
-        console.print(
-            "[yellow]·[/yellow] You haven't signed in yet. Running setup first.\n"
-        )
-        setup()
-        cfg = cfg_module.load()
-        if not cfg.api_key:
-            # Setup didn't complete (network error, ctrl-c, etc.). Don't proceed.
-            console.print(
-                "[red]✗[/red] Couldn't complete setup. Re-run [cyan]veto-agents setup[/cyan] when ready."
-            )
-            raise typer.Exit(1)
-        console.print()
+    # NOTE: We deliberately DON'T require auth here. Franklin pattern —
+    # install + use the agent locally first; receipt signing + on-chain
+    # governance are an opt-in upgrade via `veto-agents account upgrade`.
 
     already_installed = name in cfg.installed_agents
     if already_installed:
@@ -361,11 +359,17 @@ def install(
 
     # ── Welcome + summary of what's about to happen ───────────
     console.print(f"\n[bold cyan]Installing {name}[/bold cyan] — {entry.one_line}")
-    console.print(f"  [dim]Will spend on: {entry.spends_on}[/dim]")
-    console.print(f"  [dim]Spec: {entry.spec_url}[/dim]")
-    if cfg.wallet_address:
+    console.print(f"  [dim]Spends on: {entry.spends_on}[/dim]")
+    if cfg.api_key and cfg.wallet_address:
         console.print(
-            f"  [dim]Reusing your wallet:[/dim] [cyan]{cfg.wallet_address}[/cyan]"
+            f"  [dim]Will use your Veto account:[/dim] [cyan]{cfg.wallet_address[:10]}…[/cyan]"
+        )
+    elif cfg.api_key:
+        console.print("  [dim]Will use your Veto account (no funding wallet set yet).[/dim]")
+    else:
+        console.print(
+            "  [dim]Running locally — no Veto account yet. "
+            "Upgrade later for signed receipts: [cyan]veto-agents account upgrade[/cyan][/dim]"
         )
 
     # ── Policy file ───────────────────────────────────────────
@@ -487,6 +491,67 @@ def _walk_credentials(entry: "registry_module.AgentEntry", console: Console) -> 
             )
         else:
             console.print("  [dim]Skipped (optional).[/dim]")
+
+
+# ── Account management (opt-in Veto governance) ──────────────────────────
+
+account_app = typer.Typer(
+    help="Veto account — sign in for signed receipts, on-chain governance, audit trail.",
+    invoke_without_command=True,
+)
+app.add_typer(account_app, name="account")
+
+
+@account_app.callback(invoke_without_command=True)
+def account_default(ctx: typer.Context) -> None:
+    """Show account status. (No subcommand → status.)"""
+    if ctx.invoked_subcommand is not None:
+        return
+    cfg = cfg_module.load()
+    console.print()
+    if cfg.api_key:
+        masked = cfg.api_key[:12] + "…" + cfg.api_key[-4:]
+        console.print(f"[bold green]✓ Signed in[/bold green] · receipts on")
+        console.print(f"  [dim]agent_id:[/dim] {cfg.agent_id or '—'}")
+        console.print(f"  [dim]api_key:[/dim]  {masked}")
+        if cfg.wallet_address:
+            console.print(f"  [dim]wallet:[/dim]   {cfg.wallet_address}")
+        console.print(
+            f"\n  [dim]Sign out:[/dim] [cyan]veto-agents account logout[/cyan]"
+        )
+    else:
+        console.print("[yellow]Local mode.[/yellow]  No Veto account yet.\n")
+        console.print(
+            "  [dim]Your agents run, but actions aren't signed and there's no\n"
+            "  audit trail. Upgrade in 30 seconds:[/dim]\n\n"
+            "    [bold cyan]veto-agents account upgrade[/bold cyan]\n"
+        )
+    console.print()
+
+
+@account_app.command("upgrade")
+def account_upgrade() -> None:
+    """Sign in with email magic-link, enable Veto governance for your agents."""
+    cfg = cfg_module.load()
+    if cfg.api_key:
+        console.print("[yellow]·[/yellow] Already signed in. Run [cyan]veto-agents account[/cyan] to see status.")
+        return
+    banner.render(console, subtitle="Upgrading to Veto governance")
+    setup()  # delegates to the existing setup wizard for the auth/wallet/QR flow
+
+
+@account_app.command("logout")
+def account_logout() -> None:
+    """Sign out and clear local credentials."""
+    cfg = cfg_module.load()
+    if not cfg.api_key:
+        console.print("[dim]Not signed in.[/dim]")
+        return
+    cfg.api_key = None
+    cfg.agent_id = None
+    cfg.client_id = None
+    cfg_module.save(cfg)
+    console.print("[green]✓[/green] Signed out. Your installed agents still work — just locally without signed receipts.")
 
 
 # ── Credentials management subcommand ────────────────────────────────────
@@ -641,7 +706,56 @@ def wallet_receive() -> None:
 @wallet_app.command("topup")
 def wallet_topup() -> None:
     """Top up the treasury via Coinbase onramp."""
-    console.print("[dim](onramp link generation lands in v0.0.4)[/dim]")
+    console.print("[dim](onramp link generation lands in v0.0.10)[/dim]")
+
+
+@wallet_app.command("setup")
+def wallet_setup_cmd() -> None:
+    """Set up your agent's funding wallet — connect existing or create new."""
+    wallet_setup_module.run(console)
+
+
+@wallet_app.command("help")
+def wallet_help() -> None:
+    """Explain how your agent's wallet works — non-custodial, you own it."""
+    wallet_setup_module.explain(console)
+
+
+@wallet_app.command("withdraw")
+def wallet_withdraw() -> None:
+    """Withdraw all funds from your agent's wallet back to your wallet."""
+    cfg = cfg_module.load()
+    if not cfg.wallet_address:
+        console.print("[yellow]·[/yellow] No wallet linked. Run [cyan]veto-agents wallet setup[/cyan].")
+        return
+    console.print(
+        f"\n[bold]Withdraw all funds[/bold] from your agent's Safe back to:\n"
+        f"  [cyan]{cfg.wallet_address}[/cyan]\n\n"
+        "[dim]v0.0.10 will build + submit the withdraw tx via your connected wallet.\n"
+        "For now, you can do this manually:\n"
+        "  1. Open https://app.safe.global\n"
+        "  2. Connect the wallet linked above\n"
+        "  3. Send the full balance to your wallet[/dim]\n"
+    )
+
+
+@wallet_app.command("revoke-veto")
+def wallet_revoke_veto() -> None:
+    """Remove Veto's Guard from your Safe — full unilateral control returns to you."""
+    cfg = cfg_module.load()
+    if not cfg.wallet_address:
+        console.print("[yellow]·[/yellow] No wallet linked.")
+        return
+    console.print(
+        "\n[bold]Remove Veto Guard from your Safe[/bold]\n\n"
+        "  After this, your Safe operates without Veto's transaction check — full\n"
+        "  unilateral control. The receipts feed for past actions stays signed (those\n"
+        "  decisions already happened); future actions just don't go through Veto.\n\n"
+        "[dim]v0.0.10 will build + submit this tx via your wallet. For now:\n"
+        "  1. Open https://app.safe.global\n"
+        "  2. Connect your wallet\n"
+        "  3. Apps → Transaction Builder → setGuard(0x0)[/dim]\n"
+    )
 
 
 def _render_wallet_dashboard() -> None:
