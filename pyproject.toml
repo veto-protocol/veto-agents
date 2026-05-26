@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "veto-agents"
-version = "0.0.9"
+version = "0.0.10"
 description = "AI agents that pay for things on your behalf, with the safety built in. Hermes-core, governed by Veto."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -30,10 +30,19 @@ dependencies = [
     "pyyaml>=6.0",
     "platformdirs>=4.0",
     "qrcode>=7.4",
+    # OS-native secret storage (macOS Keychain / GNOME Keyring / Win Credential
+    # Manager). Falls back to encrypted file on headless systems. Same library
+    # used by gh CLI, AWS CLI, Vercel CLI, npm.
+    "keyring>=25.0",
 ]
 
 [project.optional-dependencies]
 hermes = ["hermes-agent>=0.2.0"]
+# Optional per-agent extras. Users install only what they need:
+#   pipx install 'veto-agents[groups]'
+groups = ["python-telegram-bot>=22.0", "anthropic>=0.40"]
+media = ["anthropic>=0.40"]
+all = ["python-telegram-bot>=22.0", "anthropic>=0.40"]
 dev = ["pytest>=8.0", "pytest-asyncio>=0.23", "ruff>=0.6"]
 
 [project.urls]

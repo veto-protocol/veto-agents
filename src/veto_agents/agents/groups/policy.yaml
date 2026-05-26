@@ -1,0 +1,56 @@
+policy_name: groups-agent-default
+policy_version: 1
+description: |
+  Default policy for the Veto Groups agent — a 24/7 Telegram community bot.
+  Caps are conservative; tighten or loosen via `/setcap` in the bot's DM
+  or `veto-agents policy edit groups`.
+
+caps:
+  per_transaction_usd: 0.50
+  per_day_usd: 5.00
+  per_month_usd: 50.00
+  human_approval_above_usd: 1.00
+
+allowlist_merchants:
+  - api.anthropic.com
+  - api.nousresearch.com
+  - api.openai.com
+  - api.exa.ai
+  - api.tavily.com
+  - api.assemblyai.com
+  - api.firecrawl.dev
+
+blocklist_merchants: []
+
+time_windows:
+  active_hours: "06:00-23:00 local"
+
+rate_limits:
+  txs_per_hour: 60
+  txs_per_day: 200
+
+categories:
+  allow:
+    - ai_inference
+    - search
+    - transcription
+  block:
+    - finance
+    - crypto_transfer
+    - shopping
+    - media_generation
+
+intent_keywords:
+  required: []
+  forbidden:
+    - "send money to"
+    - "transfer funds"
+    - "share private key"
+    - "wire transfer"
+
+behavior:
+  require_plan_preview: false   # group replies are conversational; no plan-step
+  require_per_step_estimate: false
+  require_post_action_receipt_link: true
+  default_reply_tone: friendly
+  knowledge_source: channel-history-7d

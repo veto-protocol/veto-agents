@@ -357,8 +357,9 @@ def install(
             f"Re-running credential walkthrough.\n"
         )
 
-    # ── Welcome + summary of what's about to happen ───────────
-    console.print(f"\n[bold cyan]Installing {name}[/bold cyan] — {entry.one_line}")
+    # ── Banner + welcome + summary of what's about to happen ──
+    banner.render(console, subtitle=f"Installing {entry.name}")
+    console.print(f"[bold cyan]{entry.name}[/bold cyan] — {entry.one_line}")
     console.print(f"  [dim]Spends on: {entry.spends_on}[/dim]")
     if cfg.api_key and cfg.wallet_address:
         console.print(
@@ -639,6 +640,21 @@ def research(prompt: str, yes: bool = typer.Option(False, "--yes", "-y")) -> Non
 def inbox(prompt: str = typer.Argument(""), yes: bool = typer.Option(False, "--yes", "-y")) -> None:
     """Run the inbox agent (interactive if no prompt)."""
     _run_agent("inbox", prompt, yes=yes)
+
+
+@app.command()
+def groups(
+    prompt: str = typer.Argument("", help="One-shot question to test the brain. Omit to run the daemon."),
+    daemon: bool = typer.Option(False, "--daemon", help="Run as a long-running Telegram bot (production)."),
+    yes: bool = typer.Option(False, "--yes", "-y"),
+) -> None:
+    """Run the Groups agent: one-shot (`groups "..."`) or 24/7 daemon (`groups --daemon`)."""
+    cfg = cfg_module.load()
+    if daemon:
+        from .agents.groups import run_daemon
+        run_daemon(cfg, console)
+    else:
+        _run_agent("groups", prompt or "hello", yes=yes)
 
 
 # ─── policy ──────────────────────────────────────────────────────────────

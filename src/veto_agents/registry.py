@@ -42,8 +42,8 @@ class AgentEntry:
 REGISTRY: list[AgentEntry] = [
     AgentEntry(
         name="media",
-        one_line="Generates images, video, and audio for you.",
-        spends_on="Replicate, Runway, ElevenLabs",
+        one_line="Generates images, video, and audio AND posts to Instagram/Facebook (Meta MCP).",
+        spends_on="Replicate, Runway, ElevenLabs + posts via Meta MCP",
         spec_url="https://github.com/veto-protocol/veto-agents/blob/main/agents/media/SPEC.md",
         package="veto_agents.agents.media",
         credentials=(
@@ -59,7 +59,19 @@ REGISTRY: list[AgentEntry] = [
                 label="ElevenLabs API key (voiceover)",
                 signup_url="https://elevenlabs.io/app/settings/api-keys",
                 required=False,
-                notes="Only needed if you want voice synthesis. Skippable.",
+                notes="Only needed for voice synthesis. Skippable.",
+            ),
+            Credential(
+                env_var="META_ACCESS_TOKEN",
+                label="Meta MCP token (post to Instagram + Facebook)",
+                signup_url="https://mcp.facebook.com/ads",
+                required=False,
+                notes=(
+                    "Meta's official MCP server (29 tools across FB + IG). "
+                    "OAuth via Facebook Business. ~60% of accounts have access; "
+                    "the rest are still in phased rollout. Skip if you only want "
+                    "to generate to local files."
+                ),
             ),
         ),
     ),
@@ -134,6 +146,46 @@ REGISTRY: list[AgentEntry] = [
                 notes="Optional — only needed for transcription features.",
             ),
             # Gmail/Outlook are OAuth — handled separately, not env vars.
+        ),
+    ),
+    AgentEntry(
+        name="groups",
+        one_line="24/7 Telegram community bot — answers, summaries, transcription, alerts.",
+        spends_on="Anthropic / Hermes + Exa + AssemblyAI",
+        spec_url="https://github.com/veto-protocol/veto-agents/blob/main/agents/groups/SPEC.md",
+        package="veto_agents.agents.groups",
+        credentials=(
+            Credential(
+                env_var="TELEGRAM_BOT_TOKEN",
+                label="Telegram bot token (created free via @BotFather)",
+                signup_url="https://t.me/BotFather",
+                required=True,
+                notes=(
+                    "Open Telegram → @BotFather → /newbot → save the token. "
+                    "Takes 60 seconds, no payment, no verification."
+                ),
+            ),
+            Credential(
+                env_var="ANTHROPIC_API_KEY",
+                label="Anthropic API key (Claude for replies + summaries)",
+                signup_url="https://console.anthropic.com/settings/keys",
+                required=True,
+                notes="Or use NOUS_API_KEY / OPENAI_API_KEY — any provider works.",
+            ),
+            Credential(
+                env_var="EXA_API_KEY",
+                label="Exa neural search (for answering questions with paid sources)",
+                signup_url="https://dashboard.exa.ai/api-keys",
+                required=False,
+                notes="Optional — bot falls back to history-only answers without it.",
+            ),
+            Credential(
+                env_var="ASSEMBLYAI_API_KEY",
+                label="AssemblyAI (voice-note transcription)",
+                signup_url="https://www.assemblyai.com/app/account",
+                required=False,
+                notes="Optional — transcription off if not set.",
+            ),
         ),
     ),
 ]

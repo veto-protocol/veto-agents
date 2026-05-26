@@ -169,6 +169,7 @@ def skip_wallet(console: Console) -> None:
 
 def run(console: Console) -> None:
     """Top-level wallet-setup wizard. Idempotent — re-running re-walks the choice."""
+    from . import banner as banner_module
     cfg = cfg_module.load()
     if not cfg.api_key:
         console.print(
@@ -176,6 +177,7 @@ def run(console: Console) -> None:
         )
         return
 
+    banner_module.render(console, subtitle="Setting up your agent's wallet")
     explain(console)
 
     if cfg.wallet_address:
