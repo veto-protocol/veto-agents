@@ -128,29 +128,25 @@ def connect_existing(console: Console, cfg) -> bool:
 # ── Option 2: embedded wallet via web ──
 
 def setup_embedded(console: Console, cfg) -> bool:
-    """Open browser to the embedded-wallet flow. Returns True if launched."""
+    """Open browser to the embedded-wallet flow. Returns True if launched.
+
+    Status: the hosted Privy + Safe-deploy page lands in HARD_STOP v1
+    (see HARD_STOP_V1.md in the repo). Until then this option is a no-op
+    that tells the user honestly what's coming and points them at the
+    paste-an-address path.
+    """
     console.print("\n[bold]Create a new wallet, just with your email[/bold]\n")
     console.print(
-        "  Opens a secure browser window where Privy creates an embedded smart wallet\n"
-        "  for you. No seed phrase to manage — your email becomes the recovery method.\n"
-        "  Veto deploys a Safe on top of that embedded wallet with Veto Guard installed.\n"
+        "  [dim]When this is live, you'll click one button: sign in with your email,\n"
+        "  a Safe smart account gets deployed for you on Base with Veto Guard\n"
+        "  installed at deploy time — gas paid for you, no seed phrase, recoverable\n"
+        "  via your email. That's the loop that makes the on-chain hard-stop real.[/dim]\n"
     )
-    if not Confirm.ask("Open browser to continue?", default=True):
-        return False
-
-    # v0.0.9: the hosted /wallet/setup page doesn't exist yet — it's the
-    # Privy + Safe-deploy frontend we'll build next. For now we open the
-    # placeholder and tell the user honestly.
-    import webbrowser
-    base = cfg.veto_api_base.replace("/api/v1", "")
-    url = f"{base}/wallet/setup?device_code=<TODO-issue-device-code>"
-    try:
-        webbrowser.open(url)
-    except Exception:
-        pass
     console.print(
-        f"\n  [yellow]·[/yellow] Embedded-wallet web flow lands in v0.0.10 — the page at\n"
-        f"  {url}\n  isn't live yet. For now, use Option 1 (existing wallet) or come back soon.\n"
+        "  [yellow]·[/yellow] This option isn't live yet. It's the next thing we're "
+        "building (see [cyan]HARD_STOP_V1.md[/cyan] in the repo).\n"
+        "    For now, paste an existing wallet address — your spends will run\n"
+        "    through Veto's authorize layer until the hosted setup ships.\n"
     )
     return False
 
