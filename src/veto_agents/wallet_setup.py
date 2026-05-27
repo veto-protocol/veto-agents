@@ -128,27 +128,132 @@ def connect_existing(console: Console, cfg) -> bool:
 # ── Option 2: embedded wallet via web ──
 
 def setup_embedded(console: Console, cfg) -> bool:
-    """Open browser to the embedded-wallet flow. Returns True if launched.
+    """Device-code flow against veto-ai.com/wallet/setup.
 
-    Status: the hosted Privy + Safe-deploy page lands in HARD_STOP v1
-    (see HARD_STOP_V1.md in the repo). Until then this option is a no-op
-    that tells the user honestly what's coming and points them at the
-    paste-an-address path.
+    Talks to the backend endpoints from gateway/wallet_setup_views.py:
+      1. POST /api/v1/wallet/setup/start/   — registers the device code
+      2. open browser to the setup URL      — user signs in + deploys
+      3. POST /api/v1/wallet/setup/poll/    — wait for the result
+
+    On success, persists the deployed Safe + Guard + owner + chain to
+    cfg. Returns True if the flow completed, False if the user aborted
+    or the deploy failed.
     """
+    import secrets as _secrets
+    import time as _time
+    import webbrowser
+
+    import httpx
+
+    if not cfg.api_key:
+        console.print("[red]✗[/red] Not signed in. Run [cyan]veto-agents setup[/cyan] first.")
+        return False
+
+    api_base = cfg.veto_api_base.rstrip("/")
+    headers = {"Content-Type": "application/json", "X-Veto-API-Key": cfg.api_key}
+    device_code = "dc_" + _secrets.token_urlsafe(24)
+
     console.print("\n[bold]Create a new wallet, just with your email[/bold]\n")
     console.print(
-        "  [dim]When this is live, you'll click one button: sign in with your email,\n"
-        "  a Safe smart account gets deployed for you on Base with Veto Guard\n"
-        "  installed at deploy time — gas paid for you, no seed phrase, recoverable\n"
-        "  via your email. That's the loop that makes the on-chain hard-stop real.[/dim]\n"
+        "  [dim]Sign in with your email — Privy creates an embedded wallet for you,\n"
+        "  and Veto deploys a Safe smart account on Base Sepolia with the Veto\n"
+        "  Guard module installed. No seed phrase. Gas is sponsored.[/dim]\n"
     )
+
+    # 1. Start the session.
+    try:
+        r = httpx.post(
+            f"{api_base}/wallet/setup/start/",
+            json={"device_code": device_code},
+            headers=headers,
+            timeout=15.0,
+        )
+        r.raise_for_status()
+        start_data = r.json()
+    except httpx.HTTPStatusError as e:
+        console.print(f"  [red]✗[/red] Couldn't start setup: HTTP {e.response.status_code}.")
+        try:
+            err = e.response.json().get("error")
+            if err:
+                console.print(f"    [dim]{err}[/dim]")
+        except Exception:
+            pass
+        return False
+    except Exception as e:
+        console.print(f"  [red]✗[/red] Couldn't reach Veto: {e}")
+        return False
+
+    setup_url = start_data["setup_url"]
+
+    # 2. Open browser. The page does the Privy + Safe deploy and POSTs
+    # the result back to /complete/. We don't see it from here — we
+    # just poll.
+    console.print(f"  [green]✓[/green] Opening: [cyan]{setup_url}[/cyan]")
+    try:
+        webbrowser.open(setup_url)
+    except Exception:
+        # Browser open failed — the URL is still visible above so the
+        # user can copy-paste it. Continue to the poll loop.
+        pass
     console.print(
-        "  [yellow]·[/yellow] This option isn't live yet. It's the next thing we're "
-        "building (see [cyan]HARD_STOP_V1.md[/cyan] in the repo).\n"
-        "    For now, paste an existing wallet address — your spends will run\n"
-        "    through Veto's authorize layer until the hosted setup ships.\n"
+        "  [dim]Sign in and approve the deploy. We'll wait — usually 10–30s.[/dim]\n"
     )
-    return False
+
+    # 3. Poll for completion. 30-min hard ceiling matches the session
+    # TTL; 2s interval matches the magic-link auth flow.
+    deadline = _time.time() + 30 * 60
+    interval = 2.0
+    try:
+        with console.status("[dim]waiting for the deploy to finish…[/dim]", spinner="dots"):
+            while _time.time() < deadline:
+                _time.sleep(interval)
+                try:
+                    pr = httpx.post(
+                        f"{api_base}/wallet/setup/poll/",
+                        json={"device_code": device_code},
+                        timeout=15.0,
+                    )
+                except Exception:
+                    continue
+                if pr.status_code == 404:
+                    console.print("\n  [red]✗[/red] Session not found. Re-run setup.")
+                    return False
+                if not pr.ok:
+                    continue
+                data = pr.json()
+                status = data.get("status")
+                if status == "pending":
+                    continue
+                if status == "expired":
+                    console.print("\n  [red]✗[/red] Setup timed out (30 min). Re-run.")
+                    return False
+                if status == "failed":
+                    reason = data.get("failure_reason") or "unknown"
+                    console.print(f"\n  [red]✗[/red] Deploy failed in browser: {reason}")
+                    return False
+                if status == "ready":
+                    cfg.wallet_address = data["safe_address"]
+                    cfg.guard_address = data["guard_address"]
+                    cfg.safe_owner_address = data["owner_address"]
+                    cfg.chain_id = int(data.get("chain_id", 0)) or None
+                    cfg.wallet_chain = data.get("chain", cfg.wallet_chain)
+                    cfg_module.save(cfg)
+                    break
+            else:
+                console.print("\n  [red]✗[/red] Setup timed out (30 min). Re-run.")
+                return False
+    except KeyboardInterrupt:
+        console.print("\n  [yellow]·[/yellow] Cancelled. Re-run setup when you're ready.")
+        return False
+
+    console.print(
+        f"  [green]✓[/green] Wallet deployed.\n"
+        f"    [dim]Safe :  [/dim][cyan]{cfg.wallet_address}[/cyan]\n"
+        f"    [dim]Guard:  [/dim][cyan]{cfg.guard_address}[/cyan]\n"
+        f"    [dim]Owner:  [/dim][cyan]{cfg.safe_owner_address}[/cyan]\n"
+        f"    [dim]Chain:  {cfg.wallet_chain} (chain id {cfg.chain_id})[/dim]\n"
+    )
+    return True
 
 
 # ── Option 3: skip ──

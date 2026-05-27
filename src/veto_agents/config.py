@@ -63,11 +63,18 @@ class Config:
     llm_endpoint: str | None = None  # e.g. https://api.nous.ai, or a local URL
     llm_model: str | None = None  # e.g. "hermes-3-405b" or "claude-sonnet-4-7"
 
-    # Wallet — populated by `veto-agents setup`.
-    # In v0.0.2 this is a burner address (random 20 bytes hex-encoded). In
-    # v0.0.3 it's replaced with a real Privy-provisioned wallet on Base.
+    # Wallet — populated by `veto-agents wallet setup`.
+    # `wallet_address` is the spend-from address used by agents: in
+    # HARD_STOP_v1 that's the deployed Safe (kept under this name for
+    # back-compat with earlier versions). `safe_owner_address` is the
+    # user's EOA (the actual owner of the Safe); `guard_address` is the
+    # VetoGuard module installed on the Safe; `chain_id` is the EVM
+    # chain id (84532 = Base Sepolia, 8453 = Base mainnet).
     wallet_address: str | None = None
     wallet_chain: str = "base"
+    safe_owner_address: str | None = None
+    guard_address: str | None = None
+    chain_id: int | None = None
 
     # Veto governance endpoint. Defaults to prod; overridable for local dev.
     veto_api_base: str = "https://veto-ai.com/api/v1"
