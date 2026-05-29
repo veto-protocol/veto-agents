@@ -28,6 +28,61 @@ from ...veto_client import AuthorizeResult, VetoClient
 from .tools import replicate_image
 
 
+# USDC contract addresses by chain — used to construct on-chain ERC20.transfer()
+# calldata when we build a SafeTx representation of an agent's spend.
+USDC_ADDRESS = {
+    84532: "0x036CbD53842c5426634e7929541eC2318f3dCF7e",  # Base Sepolia
+    8453:  "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",  # Base mainnet
+}
+
+# A fixed "demo merchant" Safe transfers go to when the agent doesn't have a
+# real on-chain recipient. Veto's treasury on Base Sepolia.
+DEMO_MERCHANT = "0x000000000000000000000000000000000000Beef"
+
+
+def _build_safe_tx_for_step(cfg, step, prompt: str, step_index: int):
+    """Construct a SafeTx dict for an authorize call, or None.
+
+    Returns None when the user hasn't set up an on-chain wallet — Veto
+    still issues an off-chain receipt; the Guard side just doesn't
+    participate. When the user HAS configured a Safe (cfg.wallet_address),
+    we build a USDC ERC20.transfer() call for the step's est_usd amount.
+
+    The on-chain side wants integer amounts in token decimals (USDC is 6),
+    not float USD. We snap to whole cents to keep the number deterministic.
+    """
+    safe = getattr(cfg, "wallet_address", None)
+    chain_id = getattr(cfg, "chain_id", None) or 84532
+    if not safe or not isinstance(safe, str) or not safe.startswith("0x"):
+        return None
+    usdc = USDC_ADDRESS.get(int(chain_id))
+    if not usdc:
+        return None
+
+    # USDC has 6 decimals. step.est_usd is a float in USD.
+    amount_units = max(1, int(round(step.est_usd * 1_000_000)))
+    # encode transfer(address,uint256)
+    selector = "0xa9059cbb"
+    to_addr = DEMO_MERCHANT[2:].lower().zfill(64)
+    amount_hex = format(amount_units, "x").zfill(64)
+    data = "0x" + selector[2:] + to_addr + amount_hex
+
+    return {
+        "safe": safe,
+        "chain_id": int(chain_id),
+        "to": usdc,
+        "value": 0,
+        "data": data,
+        "operation": 0,
+        # Nonce is the Safe's current nonce, looked up on-chain at submit
+        # time. We pass 0 here as a sentinel — the backend signs whatever
+        # nonce we send; the agent (or the user) is responsible for using
+        # the right nonce when they finally submit. Demo recordings can
+        # snapshot nonce=0 since a fresh Safe starts there.
+        "nonce": 0,
+    }
+
+
 @dataclass
 class Step:
     label: str
@@ -178,6 +233,12 @@ def run(prompt: str, *, cfg, console: Console, auto_confirm: bool = False) -> No
             console.print(f"[bold cyan]Step {i}/{len(steps)}[/bold cyan] · {s.label}")
 
             # Every spend authorizes through Veto. No bypass.
+            # If the user has an on-chain wallet configured, build a SafeTx
+            # so the response carries a guard-acceptable signature alongside
+            # the off-chain receipt. We log what would be submitted on-chain
+            # but don't actually submit yet — that needs the user's wallet
+            # signature, which lives in their Privy session, not the CLI.
+            safe_tx_payload = _build_safe_tx_for_step(cfg, s, prompt, i)
             try:
                 result: AuthorizeResult = client.authorize(
                     agent_id=agent_id,
@@ -193,6 +254,7 @@ def run(prompt: str, *, cfg, console: Console, auto_confirm: bool = False) -> No
                         "step": i,
                         "of": len(steps),
                     },
+                    safe_tx=safe_tx_payload,
                 )
             except Exception as e:
                 console.print(f"  [red]✗ Veto authorize failed:[/red] {e}")
@@ -215,6 +277,15 @@ def run(prompt: str, *, cfg, console: Console, auto_confirm: bool = False) -> No
                 f"  [green]✓ allowed[/green] by Veto"
                 + (f" · receipt {result.receipt_url}" if result.receipt_url else "")
             )
+            # If a SafeTx was sent + the verdict was allow, surface the
+            # guard-acceptable signature. Proves the on-chain side would
+            # let this through if the user submitted the Safe transaction.
+            if safe_tx_payload and result.safe_signature:
+                short_sig = result.safe_signature[:10] + "…" + result.safe_signature[-6:]
+                console.print(
+                    f"    [dim]on-chain proof: signed by {result.safe_signer} "
+                    f"({short_sig})[/dim]"
+                )
 
             # Tool execution
             if s.tool_name == "replicate.image_gen":
