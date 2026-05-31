@@ -11,6 +11,7 @@ caps:
   human_approval_above_usd: 1.50
 
 allowlist_merchants:
+  - fal.x402.paysponge.com   # keyless image/video gen over x402 (default)
   - replicate.com
   - api.runwayml.com
   - api.elevenlabs.io

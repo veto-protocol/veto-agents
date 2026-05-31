@@ -25,7 +25,7 @@ from rich.prompt import Prompt
 from rich.table import Table
 
 from ...veto_client import AuthorizeResult, VetoClient
-from .tools import replicate_image
+from .tools import fal_image
 
 
 # USDC contract addresses by chain — used to construct on-chain ERC20.transfer()
@@ -89,6 +89,8 @@ class Step:
     merchant: str
     est_usd: float
     tool_name: str
+    model: str | None = None      # for fal.image_gen: which model the user/policy chose
+    endpoint: str | None = None   # discovered x402 endpoint URL (from CDP Bazaar), if any
 
 
 def _classify_brief(prompt: str) -> list[Step]:
@@ -112,10 +114,11 @@ def _classify_brief(prompt: str) -> list[Step]:
     elif any(w in p for w in ("image", "picture", "photo", "logo", "icon", "shot")):
         steps.append(
             Step(
-                label="Generate image — Replicate (Flux Schnell)",
-                merchant="replicate.com",
-                est_usd=replicate_image.estimate_cost("flux-schnell"),
-                tool_name="replicate.image_gen",
+                label="Generate image — fal.ai (FLUX Schnell) over x402",
+                merchant="fal.x402.paysponge.com",
+                est_usd=fal_image.estimate_cost("flux-schnell"),
+                tool_name="fal.image_gen",
+                model="flux-schnell",
             )
         )
 
@@ -133,10 +136,11 @@ def _classify_brief(prompt: str) -> list[Step]:
     if not steps:
         steps.append(
             Step(
-                label="Generate image — Replicate (Flux Schnell) [inferred]",
-                merchant="replicate.com",
-                est_usd=replicate_image.estimate_cost("flux-schnell"),
-                tool_name="replicate.image_gen",
+                label="Generate image — fal.ai (FLUX Schnell) over x402 [inferred]",
+                merchant="fal.x402.paysponge.com",
+                est_usd=fal_image.estimate_cost("flux-schnell"),
+                tool_name="fal.image_gen",
+                model="flux-schnell",
             )
         )
 
@@ -160,12 +164,67 @@ def _render_plan(steps: list[Step], console: Console) -> float:
     return total
 
 
+def _choice_gate(steps: list[Step], console: Console, *, auto_confirm: bool) -> None:
+    """Surface options the agent could pick between, and let the USER choose.
+
+    Principle: an agent must not silently pick a more expensive option. For
+    image steps there are several fal.ai models at different prices — we show
+    them and the user picks. `auto_confirm` (non-interactive) delegates to the
+    cheapest, which is the safe default. A future version reads a policy
+    "selection strategy" (cheapest / prefer X / cap) to delegate automatically.
+    See feedback_agent_choice_needs_consent.
+    """
+    for s in steps:
+        if s.tool_name != "fal.image_gen":
+            continue
+
+        # Discover live x402 image services from the CDP Bazaar (self-updating,
+        # quality-ranked). Fall back to the built-in fal.ai models if discovery
+        # is unavailable or returns nothing. Each option = (label, price, endpoint).
+        options: list[tuple[str, float, str | None]] = []
+        try:
+            from veto_pay.discovery import search as _x402_search
+            hits = _x402_search("text to image generation from a prompt", network="base", limit=5)
+            for h in hits:
+                if not h.url:
+                    continue
+                price = h.price_usd if h.price_usd is not None else 0.0
+                desc = (h.description or h.host)[:48]
+                options.append((f"{h.host} — {desc}", price, h.url))
+        except Exception:
+            pass
+        if not options:
+            options = [(f"fal.ai ({m})", p, None) for m, p in fal_image.models()]
+
+        # Cheapest first (price 0/unknown sorts low — show those last).
+        options.sort(key=lambda o: (o[1] if o[1] > 0 else 1e9))
+
+        if auto_confirm:
+            label, price, endpoint = options[0]
+            s.est_usd, s.endpoint = price, endpoint
+            continue
+
+        console.print("[bold]Where to generate the image[/bold] — you choose (the agent won't pick a pricier one on its own):")
+        for idx, (label, price, _ep) in enumerate(options, 1):
+            ptxt = f"${price:.2f}" if price > 0 else "price TBD"
+            console.print(f"  [bold cyan]{idx}.[/bold cyan] {label}  [yellow]{ptxt}[/yellow]")
+        raw = Prompt.ask("Pick", choices=[str(i) for i in range(1, len(options) + 1)], default="1")
+        label, price, endpoint = options[int(raw) - 1]
+        s.est_usd, s.endpoint = price, endpoint
+        s.label = f"Generate image — {label}"
+        console.print()
+
+
 def run(prompt: str, *, cfg, console: Console, auto_confirm: bool = False) -> None:
     """Entrypoint called by `veto-agents media "<prompt>"`."""
     console.print(f"\n[bold]Brief:[/bold] {prompt}\n")
 
     # 1. Plan
     steps = _classify_brief(prompt)
+
+    # 1.5. Choice-gate — the user picks between options; the agent never
+    # silently upgrades to a costlier one. Veto governs decisions, not just $.
+    _choice_gate(steps, console, auto_confirm=auto_confirm)
 
     # 2. Render plan + estimate
     total = _render_plan(steps, console)
@@ -232,13 +291,35 @@ def run(prompt: str, *, cfg, console: Console, auto_confirm: bool = False) -> No
         for i, s in enumerate(steps, 1):
             console.print(f"[bold cyan]Step {i}/{len(steps)}[/bold cyan] · {s.label}")
 
-            # Every spend authorizes through Veto. No bypass.
-            # If the user has an on-chain wallet configured, build a SafeTx
-            # so the response carries a guard-acceptable signature alongside
-            # the off-chain receipt. We log what would be submitted on-chain
-            # but don't actually submit yet — that needs the user's wallet
-            # signature, which lives in their Privy session, not the CLI.
-            safe_tx_payload = _build_safe_tx_for_step(cfg, s, prompt, i)
+            if s.tool_name == "fal.image_gen":
+                # Governed x402 spend. fal_image.generate calls Veto authorize
+                # (which also SIGNS the payment on allow) and pays fal.ai over
+                # x402. The agent holds no key — if Veto denies/escalates, no
+                # payment happens. This is the thin-agent / control-in-Veto path.
+                tool_result = fal_image.generate(
+                    prompt=prompt, model=s.model or "flux-schnell",
+                    endpoint=s.endpoint, est_usd=s.est_usd, cfg=cfg,
+                )
+                if tool_result.denied:
+                    console.print(f"  [red]✗ blocked by Veto[/red] · {tool_result.error}")
+                    if tool_result.receipt_url:
+                        console.print(f"  [dim]receipt: {tool_result.receipt_url}[/dim]")
+                    return
+                if not tool_result.ok:
+                    console.print(f"  [red]✗ tool failed[/red]")
+                    console.print(f"  [dim]{tool_result.error}[/dim]")
+                    return
+                actual_total += tool_result.actual_cost_usd
+                console.print(
+                    f"  [green]✓ paid + done[/green] · ${tool_result.actual_cost_usd:.4f} "
+                    f"· file [cyan]{tool_result.output_path}[/cyan]"
+                )
+                if tool_result.receipt_url:
+                    console.print(f"  [dim]receipt: {tool_result.receipt_url}[/dim]")
+                continue
+
+            # Video / voice are still stubbed — legacy authorize-only path
+            # until their x402 endpoints are wired the same way as images.
             try:
                 result: AuthorizeResult = client.authorize(
                     agent_id=agent_id,
@@ -248,19 +329,14 @@ def run(prompt: str, *, cfg, console: Console, auto_confirm: bool = False) -> No
                     currency="USD",
                     description=f"{s.tool_name}: {prompt[:120]}",
                     context={
-                        "source": "veto-agents-media",
-                        "intent": prompt,
-                        "tool_name": s.tool_name,
-                        "step": i,
-                        "of": len(steps),
+                        "source": "veto-agents-media", "intent": prompt,
+                        "tool_name": s.tool_name, "step": i, "of": len(steps),
                     },
-                    safe_tx=safe_tx_payload,
                 )
             except Exception as e:
                 console.print(f"  [red]✗ Veto authorize failed:[/red] {e}")
                 console.print("  [dim]Stopping. No paid action taken.[/dim]\n")
                 return
-
             if result.verdict == "deny":
                 console.print(
                     f"  [red]✗ denied by Veto[/red] · reason: "
@@ -277,38 +353,12 @@ def run(prompt: str, *, cfg, console: Console, auto_confirm: bool = False) -> No
                 f"  [green]✓ allowed[/green] by Veto"
                 + (f" · receipt {result.receipt_url}" if result.receipt_url else "")
             )
-            # If a SafeTx was sent + the verdict was allow, surface the
-            # guard-acceptable signature. Proves the on-chain side would
-            # let this through if the user submitted the Safe transaction.
-            if safe_tx_payload and result.safe_signature:
-                short_sig = result.safe_signature[:10] + "…" + result.safe_signature[-6:]
-                console.print(
-                    f"    [dim]on-chain proof: signed by {result.safe_signer} "
-                    f"({short_sig})[/dim]"
-                )
-
-            # Tool execution
-            if s.tool_name == "replicate.image_gen":
-                tool_result = replicate_image.generate(prompt=prompt)
-                actual = tool_result.actual_cost_usd
-                actual_total += actual
-                if tool_result.ok:
-                    console.print(
-                        f"  [green]✓ done[/green] · actual ${actual:.4f} "
-                        f"· file [cyan]{tool_result.output_path}[/cyan]"
-                    )
-                else:
-                    console.print(f"  [red]✗ tool failed[/red]")
-                    console.print(f"  [dim]{tool_result.error}[/dim]")
-                    return
-            else:
-                # Runway video / ElevenLabs voice still stubbed
-                actual = s.est_usd
-                actual_total += actual
-                console.print(
-                    f"  [yellow]·[/yellow] tool call stubbed for [dim]{s.tool_name}[/dim] "
-                    f"· est-cost ${actual:.2f}"
-                )
+            actual = s.est_usd
+            actual_total += actual
+            console.print(
+                f"  [yellow]·[/yellow] tool call stubbed for [dim]{s.tool_name}[/dim] "
+                f"· est-cost ${actual:.2f}"
+            )
     finally:
         if client is not None:
             client.close()

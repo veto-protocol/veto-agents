@@ -43,20 +43,16 @@ REGISTRY: list[AgentEntry] = [
     AgentEntry(
         name="media",
         one_line="Generates images, video, and audio AND posts to Instagram/Facebook (Meta MCP).",
-        spends_on="Replicate, Runway, ElevenLabs + posts via Meta MCP",
+        spends_on="fal.ai over x402 (keyless) + posts via Meta MCP",
         spec_url="https://github.com/veto-protocol/veto-agents/blob/main/agents/media/SPEC.md",
         package="veto_agents.agents.media",
         credentials=(
-            Credential(
-                env_var="REPLICATE_API_TOKEN",
-                label="Replicate API token (images + video)",
-                signup_url="https://replicate.com/account/api-tokens",
-                required=True,
-                notes="Free tier available. ~$0.003 per Flux Schnell image.",
-            ),
+            # No image/video API key needed — image generation is paid per call
+            # over x402 (fal.ai), authorized AND signed by Veto. The user funds
+            # the agent's x402 wallet; there are no provider keys to manage.
             Credential(
                 env_var="ELEVENLABS_API_KEY",
-                label="ElevenLabs API key (voiceover)",
+                label="ElevenLabs API key (voiceover — optional, until x402-wired)",
                 signup_url="https://elevenlabs.io/app/settings/api-keys",
                 required=False,
                 notes="Only needed for voice synthesis. Skippable.",
