@@ -215,6 +215,29 @@ def _choice_gate(steps: list[Step], console: Console, *, auto_confirm: bool) -> 
         console.print()
 
 
+def _require_connected_wallet(cfg, console: Console) -> bool:
+    """Ensure a wallet is connected before the agent tries to pay.
+
+    Same model as main veto: the agent spends from the user's CONNECTED
+    wallet (Privy embedded / connect-existing via `veto-agents wallet setup`),
+    governed by Veto. If no wallet is connected, the agent can't pay — so we
+    point the user at the connect flow and stop. We do NOT ask them to send
+    funds to some address; connecting the wallet is the whole step.
+
+    Returns True to proceed, False to stop.
+    """
+    if getattr(cfg, "wallet_address", None):
+        return True
+    console.print(
+        "[yellow]No wallet connected — your agent has nothing to pay with.[/yellow]\n"
+        "  Connect one (takes ~30s, same as the main Veto flow):\n"
+        "    [cyan]veto-agents wallet setup[/cyan]\n"
+        "  [dim]Use your email (Privy creates an embedded wallet) or connect an existing one.\n"
+        "   Veto governs the agent's spending from it; your personal wallet stays yours.[/dim]\n"
+    )
+    return False
+
+
 def run(prompt: str, *, cfg, console: Console, auto_confirm: bool = False) -> None:
     """Entrypoint called by `veto-agents media "<prompt>"`."""
     console.print(f"\n[bold]Brief:[/bold] {prompt}\n")
@@ -228,6 +251,12 @@ def run(prompt: str, *, cfg, console: Console, auto_confirm: bool = False) -> No
 
     # 2. Render plan + estimate
     total = _render_plan(steps, console)
+
+    # 2.6. Wallet-connect pre-flight — if the agent wants to pay and there's
+    # no connected wallet, point the user at the connect flow (same as main
+    # veto) and stop. Connecting is the step — not "send funds somewhere".
+    if not _require_connected_wallet(cfg, console):
+        return
 
     # 2.5. Pre-flight balance check — only when the user has actually set
     # up a Veto-governed wallet. Without one there's no treasury to check
