@@ -1,0 +1,57 @@
+name: Publish veto-agents
+
+# On a GitHub Release → publish to PyPI AND build standalone single-file
+# binaries for the curl one-liner (no pipx, no Python toolchain for users).
+#
+# PyPI auth uses Trusted Publishing (OIDC) — no token secret. One-time setup:
+# PyPI → project veto-agents → Publishing → add a GitHub trusted publisher
+# (repo: veto-protocol/veto-agents, workflow: publish.yml, environment: pypi).
+#
+# The binaries are attached to the Release; install.sh fetches the one for the
+# user's OS/arch:
+#   curl -fsSL https://veto-ai.com/agents/install.sh | bash
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+jobs:
+  pypi:
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write        # OIDC for PyPI trusted publishing
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install build
+      - run: python -m build
+      - uses: pypa/gh-action-pypi-publish@release/v1
+
+  binaries:
+    name: binary (${{ matrix.os }})
+    needs: pypi
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            asset: veto-agents-linux-x64
+          - os: macos-latest
+            asset: veto-agents-macos-arm64
+          - os: windows-latest
+            asset: veto-agents-windows-x64.exe
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install ".[all]" pyinstaller
+      - name: Build single-file binary
+        run: pyinstaller --onefile --name veto-agents -c src/veto_agents/cli.py
+      - name: Upload to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/veto-agents*

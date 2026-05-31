@@ -30,6 +30,9 @@ dependencies = [
     "pyyaml>=6.0",
     "platformdirs>=4.0",
     "qrcode>=7.4",
+    # Governed x402 payments. The binding path needs no local signer (Veto
+    # signs server-side), so the base package — httpx only — is enough.
+    "veto-pay>=0.6.1",
     # OS-native secret storage (macOS Keychain / GNOME Keyring / Win Credential
     # Manager). Falls back to encrypted file on headless systems. Same library
     # used by gh CLI, AWS CLI, Vercel CLI, npm.
