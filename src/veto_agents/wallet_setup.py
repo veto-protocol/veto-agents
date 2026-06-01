@@ -252,7 +252,7 @@ def setup_embedded(console: Console, cfg) -> bool:
                 if pr.status_code == 404:
                     console.print("\n  [red]✗[/red] Session not found. Re-run setup.")
                     return False
-                if not pr.ok:
+                if not pr.is_success:  # httpx Response has no .ok (that's requests)
                     continue
                 data = pr.json()
                 status = data.get("status")
