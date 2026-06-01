@@ -180,9 +180,14 @@ def _render_status(cfg) -> None:
 
 def _first_run_wizard(ctx: typer.Context) -> None:
     """First run — gets the user to a working agent in the fewest possible
-    prompts. No email, no wallet, no LLM-provider choice up front. Just:
-    pick an agent → paste the key it needs → run."""
-    banner.render(console, subtitle="AI agents that pay for things, governed by Veto")
+    prompts. Pick an agent → install it → then OFFER (skippable) to set up
+    account + wallet so it can spend for real. Lowest friction to first
+    value, but no dead-end after choosing."""
+    # The installer (install.sh) already showed the banner right before it
+    # exec'd us — don't show it twice. Standalone `veto-agents` still does.
+    import os
+    if not os.environ.get("VETO_FROM_INSTALLER"):
+        banner.render(console, subtitle="AI agents that pay for things, governed by Veto")
 
     console.print(
         "[bold]Welcome.[/bold]  Let's get you a working agent in about a minute.\n"
@@ -203,14 +208,34 @@ def _first_run_wizard(ctx: typer.Context) -> None:
     chosen = registry_module.REGISTRY[int(raw) - 1].name if raw.isdigit() else raw
 
     # install walks the chosen agent's credentials (browser-open for each).
-    ctx.invoke(install, name=chosen)
+    # no_banner: the wizard already rendered the banner — don't repeat it
+    # (that was the old triple-banner pile-up on fresh installs).
+    ctx.invoke(install, name=chosen, no_banner=True)
 
-    # Soft closing line — signed receipts are a later step, not a precondition.
+    # Hand off into setup instead of dead-ending. Lowest friction to first
+    # value — they can decline and just run the agent — but if they came this
+    # far they usually want it spend-ready, so we offer right here.
     console.print(
-        "[dim]Heads up: until you run [cyan]veto-agents account upgrade[/cyan], your "
-        "agent runs locally without signed receipts. Upgrade takes 30 seconds via "
-        "email magic-link, anytime.[/dim]\n"
+        f"\n[bold]{chosen} is installed[/bold] and runs locally right now.\n"
+        "[dim]To let it spend for real, set up your account + wallet (~2 min). "
+        "Or skip and just try it — you can run setup anytime.[/dim]\n"
     )
+    if typer.confirm("Set up account + wallet now?", default=True):
+        cfg = cfg_module.load()
+        _do_login(console, cfg)
+        cfg = cfg_module.load()  # reload — _do_login persists creds to keychain
+        if cfg.api_key:
+            wallet_setup_module.run(console)
+        else:
+            console.print(
+                "\n[dim]No account yet — run [cyan]veto-agents account upgrade[/cyan] "
+                "anytime for signed receipts + spending.[/dim]\n"
+            )
+    else:
+        console.print(
+            "\n[dim]Skipped — no rush. When ready: [cyan]veto-agents account upgrade[/cyan] "
+            "(signed receipts), then [cyan]veto-agents wallet setup[/cyan] (spending).[/dim]\n"
+        )
 
 
 # ─── login (extracted from setup) ─────────────────────────────────────────
@@ -524,6 +549,7 @@ def install(
     skip_creds: bool = typer.Option(
         False, "--skip-creds", help="Skip the credential walkthrough (configure later)."
     ),
+    no_banner: bool = typer.Option(False, "--no-banner", hidden=True),
 ) -> None:
     """Install an agent: copies policy, walks you through its tool credentials.
 
@@ -550,7 +576,10 @@ def install(
         )
 
     # ── Banner + welcome + summary of what's about to happen ──
-    banner.render(console, subtitle=f"Installing {entry.name}")
+    # Suppressed when driven by the first-run wizard (which already showed
+    # the banner) — avoids the triple-banner pile-up on fresh install.
+    if not no_banner:
+        banner.render(console, subtitle=f"Installing {entry.name}")
     console.print(f"[bold cyan]{entry.name}[/bold cyan] — {entry.one_line}")
     console.print(f"  [dim]Spends on: {entry.spends_on}[/dim]")
     if cfg.api_key and cfg.wallet_address:

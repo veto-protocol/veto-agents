@@ -146,7 +146,9 @@ if [ -e /dev/tty ] && command -v veto-agents >/dev/null 2>&1; then
     case "$REPLY" in
       [Yy]*)
         printf '\n'
-        exec veto-agents < /dev/tty
+        # VETO_FROM_INSTALLER tells the first-run wizard the banner was already
+        # shown by the installer, so it doesn't render it a second time.
+        exec env VETO_FROM_INSTALLER=1 veto-agents < /dev/tty
         ;;
       *)
         printf '\n  No rush. When you are ready:\n\n'
