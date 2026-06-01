@@ -30,6 +30,40 @@ from . import config as cfg_module
 from .register import is_valid_evm_address
 
 
+def fetch_account_wallet(cfg) -> dict | None:
+    """Read the account's active governed wallet from main Veto.
+
+    Wallet onboarding lives in the main Veto product (the shared
+    veto-ai.com/wallet/setup flow); the account's wallet is the single
+    source of truth. veto-agents consumes it here at spend time rather
+    than keeping its own — so the wallet a user set up in Veto is the
+    same one the agent spends from.
+
+    Returns the wallet dict ({owner_address, privy_wallet_id,
+    smart_account_address, chain, mode, status, label}) or None if the
+    account has no wallet yet (caller should point the user at the
+    shared setup flow) or the call fails (fail-safe — agent stays in
+    decision-only mode rather than guessing a wallet).
+    """
+    import httpx
+
+    if not getattr(cfg, "api_key", None):
+        return None
+    base = getattr(cfg, "veto_api_base", "https://veto-ai.com/api/v1").rstrip("/")
+    if not base.endswith("/api/v1"):
+        base = base.rstrip("/") + "/api/v1"
+    try:
+        r = httpx.get(
+            f"{base}/wallet/",
+            headers={"X-Veto-API-Key": cfg.api_key},
+            timeout=15.0,
+        )
+        r.raise_for_status()
+        return r.json().get("wallet")
+    except Exception:
+        return None
+
+
 # ── Safety + education content shown before any "send funds" step ──
 
 SAFETY_EXPLAINER = """\

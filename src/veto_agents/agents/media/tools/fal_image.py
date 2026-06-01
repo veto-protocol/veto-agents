@@ -86,10 +86,21 @@ def generate(
         return ToolResult(ok=False, actual_cost_usd=0.0,
                           error="Not signed in. Run `veto-agents setup` first.")
 
+    # Read the account's governed wallet from main Veto (single source of
+    # truth). If present, hand Veto the delegated-signer identity so it
+    # signs the x402 EIP-3009 payment on the user's OWN wallet (Model B);
+    # the `from` is the Privy EOA, not the Safe (only an EOA can produce
+    # an EIP-3009 signature). If absent, Veto falls back to its derived
+    # testnet key and the spend still gets governed.
+    from veto_agents.wallet_setup import fetch_account_wallet
+    wallet = fetch_account_wallet(cfg) or {}
+
     ctx = AdapterContext(
         veto_api_key=cfg.api_key,
         veto_agent_id=cfg.agent_id,
         veto_base_url=getattr(cfg, "veto_api_base", "https://veto-ai.com").removesuffix("/api/v1").rstrip("/"),
+        privy_wallet_id=wallet.get("privy_wallet_id", "") or "",
+        wallet_address=wallet.get("owner_address", "") or "",
     )
 
     # Pay-and-call. Veto authorizes + signs; we never hold a key.
