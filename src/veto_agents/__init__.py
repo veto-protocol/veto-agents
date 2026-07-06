@@ -3,4 +3,6 @@
 Hermes-core. Governed by Veto. Plan-then-execute by design.
 """
 
-__version__ = "0.0.24"
+# Keep in lockstep with `version` in pyproject.toml (both are the source of
+# truth for a release: pyproject drives the wheel, this drives `--version`).
+__version__ = "0.0.25"

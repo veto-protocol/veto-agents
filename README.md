@@ -4,6 +4,22 @@
 
 A curated set of consumer AI agents — each one designed from day zero to spend money to do real work for you, every action governed by [Veto](https://veto-ai.com), every spend signed, every verdict verifiable.
 
+---
+
+## ⭐ Flagship: `adbuyer` — an autonomous AI media buyer that literally can't overspend your budget
+
+Runs your Meta ads 24/7 on a standing goal — scaling winners, killing losers — with **every spend decision gated by Veto before a dollar moves**, plus a code-enforced ad-ops discipline gate that holds still-learning ad sets and clamps budget swings to ±20%. Deploy once, walk away.
+
+Reproduce the demo with zero setup — no Meta account, no real spend, real Veto:
+
+```bash
+veto-agents adbuyer -g "grow signups, US, up to $30/day" --mock --once --no-llm
+```
+
+**→ Read the full README: [src/veto_agents/agents/adbuyer/README.md](src/veto_agents/agents/adbuyer/README.md)** · MCP wiring: [docs/MCP.md](docs/MCP.md)
+
+---
+
 ## Install
 
 ```bash
@@ -13,12 +29,12 @@ curl -fsSL https://raw.githubusercontent.com/veto-protocol/veto-agents/main/inst
 Then:
 
 ```bash
-veto-agents                           # walks first-time setup (email, wallet, QR funding)
-veto-agents install media             # add your first agent + paste the Replicate token it asks for
-veto-agents media "make a neon jellyfish in cyberpunk rain"
+veto-agents                                             # first-time setup (sign in, optional wallet + funding)
+veto-agents adbuyer-setup                               # guided setup for the flagship media buyer
+veto-agents adbuyer -g "grow signups, US, up to $30/day" --mock   # run it — no Meta account, no real spend
 ```
 
-Three commands. The agent generates the image, Veto authorizes the spend, you get a signed receipt at `veto-ai.com/r/<uuid>`. That's the loop.
+Veto authorizes every spend before a dollar moves; you get a signed receipt at `veto-ai.com/r/<uuid>`. That's the loop. Prefer a one-off creative or image instead? `veto-agents create "…"` (keyless over x402 — no provider accounts).
 
 <details>
 <summary>Other install paths</summary>
@@ -47,14 +63,16 @@ That predictability is the product. Every other consumer agent in 2026 is "agent
 
 ## What's in the box
 
-Four agents, each Hermes-core with Veto governance preconfigured:
+The flagship, plus a set of forkable sample agents — each Hermes-core with Veto governance preconfigured:
 
-- **[Media](agents/media/SPEC.md)** — generates images, video, and audio for you. Pays Replicate / Runway / ElevenLabs per call. *Headline agent.*
-- **[Build](agents/build/SPEC.md)** — deploys your code on the cheapest infra it can find. Pays Vercel / Modal / Replicate for compute. *Dev headline.*
-- **[Research](agents/research/SPEC.md)** — does deep research using paid search and content. Pays Exa / Tavily / x402-gated sources.
-- **[Inbox](agents/inbox/SPEC.md)** — handles email, calendar, and scheduling using paid AI and scheduling tools.
+- **[adbuyer](src/veto_agents/agents/adbuyer/README.md)** — ⭐ *flagship.* An autonomous Meta media buyer: a creative studio (`veto-agents create`) plus a 24/7 observe → decide → discipline → govern → act loop. Every spend is Veto-gated before a dollar moves, and a code-enforced ad-ops discipline gate holds still-learning ad sets and clamps budget swings to ±20%. Runs standalone or as MCP tools.
+- **[media](agents/media/SPEC.md)** — generates images (and more) for you, **keyless over x402** (fal.ai FLUX). No provider accounts — fund the wallet and go.
+- **[build](agents/build/SPEC.md)** — deploys your code on the cheapest infra it can find.
+- **[research](agents/research/SPEC.md)** — deep research over paid search + content (Exa / Tavily / x402 sources).
+- **[inbox](agents/inbox/SPEC.md)** — handles email, calendar, and scheduling.
+- **[groups](agents/groups/SPEC.md)** — runs a Telegram community.
 
-Each agent ships with a default Veto policy (caps, allowlists, intent rules), a wallet provisioned via Privy on first run, and a receipts feed showing every action it took and why.
+Each agent ships with a default Veto policy (caps, allowlists, intent rules) and a receipts feed showing every action it took and why. Wallet setup is **opt-in** (Reown-connected or an embedded wallet, guarded by Safe + VetoGuard) — never required to try the mock demos.
 
 ## How this connects to Veto
 
@@ -62,7 +80,7 @@ Veto already ships the trust substrate:
 - **Engine** — 8-stage policy + risk evaluation
 - **Receipts** — Ed25519-signed verdicts at `veto-ai.com/r/<uuid>`
 - **APPS** — open policy schema
-- **VetoGuardedAccount** — on-chain hard-stop contract
+- **Safe + VetoGuard** — on-chain hard-stop: a Veto co-signer on your own Safe (block, never move)
 
 Veto Agents is the **consumer surface** that surfaces all of that. The agents are the front door; Veto is the load-bearing wall behind them. Same primitives, packaged for a non-developer to install and use.
 
@@ -70,10 +88,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for how the layers compose.
 
 ## Status
 
-v0 in design. Build sequence:
-1. **Media** — weeks 1–6, ship first
-2. **Build** — weeks 7–10
-3. **Research + Inbox** — weeks 11–14
+Shipping. The flagship `adbuyer` runs end-to-end today (mock or live Meta): the creative studio, the autonomous loop, the LLM-agnostic brain, and the MCP server are all live, with governance fail-closed on every action. The other agents are forkable templates.
 
 ## License
 
@@ -82,7 +97,7 @@ MIT. Each agent is a forkable template. Self-host on your own machine using vani
 ## Where the credit goes
 
 - **Hermes Agent** — Nous Research. The core runtime every agent runs on.
-- **Privy** — embedded wallet provisioning so users never see a seed phrase.
+- **Reown + Safe** — wallet connect and the guarded Safe the agents spend from.
 - **Veto Protocol** — the governance, receipts, and on-chain enforcement layer.
 
 ---

@@ -13,8 +13,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-import qrcode
-
 
 # Existing live demo contract on Base Sepolia.
 DEMO_GUARDED_ACCOUNT = "0xCBbbC4b924AF40D29f135c3a88b6F650d55d92c5"
@@ -54,6 +52,8 @@ def render_funding_qr(target: FundingTarget) -> str:
     URI is also recognized by some wallets but support is uneven, so we
     stick to the address for v0.0.2.
     """
+    import qrcode  # lazy: keep it off the CLI import path for non-wallet commands
+
     qr = qrcode.QRCode(
         version=None,
         error_correction=qrcode.constants.ERROR_CORRECT_M,

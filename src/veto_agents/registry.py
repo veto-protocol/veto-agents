@@ -145,6 +145,41 @@ REGISTRY: list[AgentEntry] = [
         ),
     ),
     AgentEntry(
+        name="adbuyer",
+        one_line="Plans + launches Meta (FB/IG) ad campaigns within a Veto-governed budget.",
+        spends_on="fal.ai over x402 (creative) + Meta ad spend",
+        spec_url="https://github.com/veto-protocol/veto-agents/blob/main/agents/adbuyer/README.md",
+        package="veto_agents.agents.adbuyer",
+        credentials=(
+            Credential(
+                env_var="META_ACCESS_TOKEN",
+                label="Meta Marketing API token (System User)",
+                signup_url="https://developers.facebook.com/apps",
+                required=True,
+                notes=(
+                    "Business Settings → System Users → generate a token scoped "
+                    "to your app with ads_management + ads_read. A SANDBOX ad "
+                    "account is recommended for the demo (identical API, never "
+                    "spends). Save to ~/.veto/meta.env."
+                ),
+            ),
+            Credential(
+                env_var="META_AD_ACCOUNT_ID",
+                label="Meta ad account id (act_...)",
+                signup_url="https://business.facebook.com/settings/ad-accounts",
+                required=True,
+                notes="Format: act_1234567890. Use a sandbox account for testing.",
+            ),
+            Credential(
+                env_var="META_PAGE_ID",
+                label="Facebook Page id (creative must attach to a Page)",
+                signup_url="https://business.facebook.com/settings/pages",
+                required=True,
+                notes="No Page → no creative → no ad. It's the #1 first-build blocker.",
+            ),
+        ),
+    ),
+    AgentEntry(
         name="groups",
         one_line="24/7 Telegram community bot — answers, summaries, transcription, alerts.",
         spends_on="Anthropic / Hermes + Exa + AssemblyAI",

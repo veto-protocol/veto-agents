@@ -23,6 +23,7 @@ import os
 import shutil
 import subprocess
 import sys
+from typing import Optional
 
 import typer
 import yaml
@@ -57,6 +58,7 @@ def _try_it_command(cfg) -> str:
     is installed yet."""
     examples = {
         "media":    'veto-agents media "an instagram carousel for a coffee shop launch — 3 frames"',
+        "adbuyer":  'veto-agents adbuyer "US traffic campaign to https://mysite.com, $20/day"',
         "groups":   'veto-agents groups "draft a welcome message for new Telegram members"',
         "research": 'veto-agents research "find the top 5 x402-adjacent open-source repos this month"',
         "inbox":    'veto-agents inbox "summarize my last 24 hours of email"',
@@ -162,6 +164,7 @@ def _render_status(cfg) -> None:
     example_for = installed[0] if installed else "media"
     examples = {
         "media": '"make a neon jellyfish in cyberpunk rain"',
+        "adbuyer": '"US traffic campaign to https://mysite.com, $20/day"',
         "build": '"deploy this repo to the cheapest provider"',
         "research": '"research the top 5 papers on agent governance"',
         "inbox": '"triage my inbox from this week"',
@@ -512,6 +515,574 @@ def setup() -> None:
     )
 
 
+# ─── adbuyer-setup — guided wizard for the ad/media buyer ──────────────────
+#
+# One-step-at-a-time onboarding for the ad buyer (no wall of env vars). Each
+# step explains WHAT it configures, WHY it's needed, and WHERE to get the value,
+# then writes to the right place with tight perms and never echoes a secret.
+#
+# Where each value lands (all HOME-scoped, so a temp-HOME test is hermetic):
+#   • LLM provider / model      → ~/.veto-agents/config.yaml  (config.save)
+#   • LLM provider key          → ~/.veto/creative.env        (director resolver)
+#   • Creative keys             → ~/.veto/creative.env        (studio resolver)
+#   • Meta ad-account creds     → ~/.veto/meta.env            (meta_env resolver)
+#   • Daily budget / creative $ → ~/.veto-agents/policies/*.yaml (Veto caps)
+#
+# The adbuyer director, controller, and studio all resolve keys via
+# creds.resolve() (env → ~/.veto/creative.env → keychain), so the LLM key lives
+# in creative.env alongside the studio keys — one file, one resolver, no split
+# brain, and nothing pasted into the OS keychain by this wizard.
+
+# Secret env-vars the wizard collects, grouped by destination file.
+_CREATIVE_ENV_KEYS = (
+    "OPENAI_API_KEY",
+    "HIGGSFIELD_API_KEY",
+    "HIGGSFIELD_API_SECRET",
+    "HIGGSFIELD_CREDENTIALS",
+    "ELEVENLABS_API_KEY",
+)
+_META_ENV_KEYS = ("META_ACCESS_TOKEN", "META_AD_ACCOUNT_ID", "META_PAGE_ID")
+
+
+def _env_truthy(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _upsert_env_var(path, key: str, value: str) -> None:
+    """Append-or-update KEY="VALUE" in a ~/.veto/*.env file without clobbering
+    other keys or comments. Round-trips through the readers' _parse_env_file
+    format (quotes stripped on read → we quote on write, so spaces/# survive).
+    Creates the file 0600 BEFORE the secret is written (no world-readable
+    window), then re-chmods. The secret value is never printed."""
+    from pathlib import Path as _P
+
+    path = _P(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lines = path.read_text().splitlines() if path.exists() else []
+    new_line = f'{key}="{value}"'
+    replaced = False
+    for i, line in enumerate(lines):
+        s = line.strip()
+        if s and not s.startswith("#") and "=" in s and s.split("=", 1)[0].strip() == key:
+            lines[i] = new_line  # update in place, keep position
+            replaced = True
+            break
+    if not replaced:
+        lines.append(new_line)
+    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write("\n".join(lines) + "\n")
+    try:
+        path.chmod(0o600)  # belt-and-suspenders if the file pre-existed at 0644
+    except OSError:
+        pass
+
+
+def _set_yaml_scalar(text: str, key: str, value: float) -> tuple[str, bool]:
+    """Surgically set `  key: <number>` to a new number in a YAML string,
+    preserving indentation, ordering, and any trailing `# comment`. Replaces
+    only the FIRST match (the caps block). Returns (new_text, changed)."""
+    import re
+
+    pat = re.compile(rf"^(\s*{re.escape(key)}:\s*)([0-9]+(?:\.[0-9]+)?)(.*)$", re.M)
+    m = pat.search(text)
+    if not m:
+        return text, False
+    new_text = text[: m.start()] + f"{m.group(1)}{value:.2f}{m.group(3)}" + text[m.end():]
+    return new_text, True
+
+
+def _read_policy_scalar(fname: str, key: str, default: float) -> float:
+    import re
+
+    p = cfg_module.policies_dir() / fname
+    if not p.exists():
+        return default
+    m = re.search(rf"^\s*{re.escape(key)}:\s*([0-9]+(?:\.[0-9]+)?)", p.read_text(), re.M)
+    return float(m.group(1)) if m else default
+
+
+def _patch_policy_caps(daily_budget, creative_cap, console: Console) -> None:
+    """Write the daily ad budget into adbuyer.yaml (caps.per_day_usd) and the
+    per-generation cap into adbuyer-creative.yaml (caps.per_transaction_usd).
+    Comment-preserving surgical edit; no-ops for values left as None."""
+    if daily_budget is not None:
+        p = cfg_module.policies_dir() / "adbuyer.yaml"
+        if p.exists():
+            txt, ok = _set_yaml_scalar(p.read_text(), "per_day_usd", float(daily_budget))
+            if ok:
+                p.write_text(txt)
+                console.print(
+                    f"  [green]✓[/green] Daily ad budget → [bold]${float(daily_budget):,.2f}/day[/bold]  [dim]{p.name}[/dim]"
+                )
+            else:
+                console.print(
+                    f"  [yellow]·[/yellow] Couldn't find per_day_usd in {p.name} — edit with "
+                    f"[cyan]veto-agents policy edit adbuyer[/cyan]"
+                )
+        else:
+            console.print(f"  [yellow]·[/yellow] {p.name} not found — install adbuyer first.")
+    if creative_cap is not None:
+        p = cfg_module.policies_dir() / "adbuyer-creative.yaml"
+        if p.exists():
+            txt, ok = _set_yaml_scalar(p.read_text(), "per_transaction_usd", float(creative_cap))
+            if ok:
+                p.write_text(txt)
+                console.print(
+                    f"  [green]✓[/green] Per-generation creative cap → [bold]${float(creative_cap):,.2f}[/bold]  [dim]{p.name}[/dim]"
+                )
+            else:
+                console.print(
+                    f"  [yellow]·[/yellow] Couldn't find per_transaction_usd in {p.name}."
+                )
+        else:
+            console.print(f"  [yellow]·[/yellow] {p.name} not found — install adbuyer first.")
+
+
+def _prompt_env_secret(key: str, label: str, url: str | None, path, console: Console) -> bool:
+    """Interactive: explain, open the signup URL, prompt, write to a *.env file.
+    Returns True if a value was saved. Never prints the value."""
+    console.print(f"  [bold]{label}[/bold]  [dim]{key}[/dim]")
+    if url:
+        console.print(f"  [dim]Get one:[/dim] [cyan]{url}[/cyan]")
+        try:
+            import webbrowser
+
+            webbrowser.open(url)
+        except Exception:
+            pass
+    value = Prompt.ask(f"  Paste {key} (or Enter to skip)", default="", password=True).strip()
+    if value:
+        _upsert_env_var(path, key, value)
+        console.print(f"  [green]✓[/green] Saved [bold]{key}[/bold] → [dim]~/.veto/{path.name}[/dim]")
+        return True
+    console.print("  [dim]Skipped (optional).[/dim]")
+    return False
+
+
+def _choose_llm_provider(cfg, requested: str | None, non_interactive: bool, console: Console):
+    """Return the chosen LLMProvider. Honors an explicit request (flag/env),
+    else prompts (interactive) or defaults to claude (non-interactive)."""
+    if requested:
+        p = llm_providers.get(requested)
+        if p is None:
+            console.print(
+                f"  [yellow]·[/yellow] Unknown provider '{requested}' — defaulting to [cyan]claude[/cyan]."
+            )
+            p = llm_providers.get("claude")
+        return p
+    if non_interactive:
+        name = cfg.llm_provider if cfg.llm_provider in llm_providers.PROVIDERS else "claude"
+        return llm_providers.get(name)
+
+    provider_list = list(llm_providers.PROVIDERS.values())
+    tbl = Table(show_header=False, box=None, pad_edge=False, padding=(0, 2))
+    tbl.add_column("idx", style="dim", no_wrap=True, width=3)
+    tbl.add_column("id", style="cyan bold", no_wrap=True)
+    tbl.add_column("label")
+    for i, prov in enumerate(provider_list, 1):
+        tbl.add_row(str(i), prov.name, prov.label)
+    console.print(tbl)
+    console.print()
+    default_name = cfg.llm_provider if cfg.llm_provider in llm_providers.PROVIDERS else "claude"
+    default_idx = next(
+        (str(i) for i, p in enumerate(provider_list, 1) if p.name == default_name), "3"
+    )
+    pick_choices = llm_providers.all_names() + [str(i) for i in range(1, len(provider_list) + 1)]
+    raw = Prompt.ask(
+        f"  Pick one [dim](1-{len(provider_list)} or name)[/dim]",
+        choices=pick_choices,
+        default=default_idx,
+        show_choices=False,
+    )
+    return provider_list[int(raw) - 1] if raw.isdigit() else llm_providers.get(raw)
+
+
+def _persist_provider_key(provider, cfg, non_interactive: bool, console: Console) -> None:
+    """Collect + persist the chosen brain's API key to ~/.veto/creative.env
+    (the file the director/controller resolver reads first). Auto-detects an
+    existing key and reuses it. Never prints the value."""
+    from .agents.adbuyer.creative import creds as _cc
+
+    env_var = provider.env_var
+    if not env_var:
+        if provider.name == "ollama":
+            console.print(
+                f"  [dim]Local Ollama at {cfg.llm_endpoint} — no key needed. Make sure it's "
+                f"running and you've run [/dim][cyan]ollama pull {cfg.llm_model}[/cyan][dim].[/dim]"
+            )
+        return
+
+    existing = _cc.resolve(env_var, cfg)
+    if existing:
+        console.print(f"  [green]✓[/green] [bold]{env_var}[/bold] already configured — using it.")
+        # If it's only in the ambient shell (ephemeral), persist so it survives.
+        if os.environ.get(env_var):
+            _upsert_env_var(_cc.CREATIVE_ENV_PATH, env_var, os.environ[env_var])
+        return
+
+    if non_interactive:
+        val = os.environ.get(env_var)
+        if val:
+            _upsert_env_var(_cc.CREATIVE_ENV_PATH, env_var, val)
+            console.print(f"  [green]✓[/green] Saved [bold]{env_var}[/bold] → [dim]~/.veto/creative.env[/dim]")
+        else:
+            console.print(
+                f"  [yellow]·[/yellow] {env_var} not provided (non-interactive). Export it or add it "
+                f"to ~/.veto/creative.env — the brain needs it to run."
+            )
+        return
+
+    _prompt_env_secret(env_var, provider.label, provider.signup_url, _cc.CREATIVE_ENV_PATH, console)
+
+
+def _collect_creative_keys(cfg, non_interactive: bool, console: Console) -> None:
+    """Step 3 — optional creative providers → ~/.veto/creative.env."""
+    from .agents.adbuyer.creative import creds as _cc
+
+    if non_interactive:
+        for key in _CREATIVE_ENV_KEYS:
+            val = os.environ.get(key)
+            if val:
+                _upsert_env_var(_cc.CREATIVE_ENV_PATH, key, val)
+                console.print(f"  [green]✓[/green] Saved [bold]{key}[/bold] → [dim]~/.veto/creative.env[/dim]")
+        return
+
+    # OpenAI image (often already set from Step 2 if the brain is openai).
+    if _cc.resolve("OPENAI_API_KEY", cfg):
+        console.print("  [green]✓[/green] OPENAI_API_KEY set — hero image (gpt-image-1) ready.")
+    else:
+        _prompt_env_secret(
+            "OPENAI_API_KEY",
+            "Hero image (gpt-image-1) — optional; free fal.ai over x402 is used if you skip",
+            "https://platform.openai.com/api-keys",
+            _cc.CREATIVE_ENV_PATH,
+            console,
+        )
+
+    # Higgsfield video (needs both halves, or a combined credential).
+    if _cc.higgsfield_credentials(cfg):
+        console.print("  [green]✓[/green] Higgsfield video already configured.")
+    elif Confirm.ask("  Add Higgsfield video keys? [dim](optional)[/dim]", default=False):
+        try:
+            import webbrowser
+
+            webbrowser.open("https://higgsfield.ai")
+        except Exception:
+            pass
+        kid = Prompt.ask("  HIGGSFIELD_API_KEY (or Enter to skip)", default="", password=True).strip()
+        ksec = Prompt.ask("  HIGGSFIELD_API_SECRET (or Enter to skip)", default="", password=True).strip()
+        if kid:
+            _upsert_env_var(_cc.CREATIVE_ENV_PATH, "HIGGSFIELD_API_KEY", kid)
+            console.print("  [green]✓[/green] Saved [bold]HIGGSFIELD_API_KEY[/bold] → [dim]~/.veto/creative.env[/dim]")
+        if ksec:
+            _upsert_env_var(_cc.CREATIVE_ENV_PATH, "HIGGSFIELD_API_SECRET", ksec)
+            console.print("  [green]✓[/green] Saved [bold]HIGGSFIELD_API_SECRET[/bold] → [dim]~/.veto/creative.env[/dim]")
+
+    # ElevenLabs voice.
+    if _cc.resolve("ELEVENLABS_API_KEY", cfg):
+        console.print("  [green]✓[/green] ElevenLabs voice already configured.")
+    elif Confirm.ask("  Add an ElevenLabs voice key? [dim](optional)[/dim]", default=False):
+        _prompt_env_secret(
+            "ELEVENLABS_API_KEY",
+            "Voiceover (ElevenLabs)",
+            "https://elevenlabs.io/app/settings/api-keys",
+            _cc.CREATIVE_ENV_PATH,
+            console,
+        )
+
+
+def _collect_meta_keys(cfg, non_interactive: bool, console: Console) -> None:
+    """Step 4 — optional Meta ad-account creds → ~/.veto/meta.env."""
+    from .agents.adbuyer import meta_env as _me
+
+    if non_interactive:
+        for key in _META_ENV_KEYS:
+            val = os.environ.get(key)
+            if val:
+                _upsert_env_var(_me.META_ENV_PATH, key, val)
+                console.print(f"  [green]✓[/green] Saved [bold]{key}[/bold] → [dim]~/.veto/meta.env[/dim]")
+        return
+
+    m = _me.describe(_me.load_meta(cfg))
+    if all(m.values()):
+        console.print("  [green]✓[/green] Meta already connected (token + ad account + page).")
+        return
+    if not Confirm.ask("  Connect a Meta ad account now? [dim](or skip and use --mock)[/dim]", default=False):
+        console.print(
+            "  [dim]Skipped — run with [/dim][cyan]--mock[/cyan][dim] anytime to try the full loop "
+            "with no account, or re-run this setup later.[/dim]"
+        )
+        return
+    console.print(
+        "  [dim]Tip: use a SANDBOX ad account (identical API, never spends real money).[/dim]"
+    )
+    specs = [
+        ("META_ACCESS_TOKEN", "System-User token (scope: ads_management + ads_read)",
+         "https://developers.facebook.com/apps"),
+        ("META_AD_ACCOUNT_ID", "Ad account id (act_… or a bare number)",
+         "https://business.facebook.com/settings/ad-accounts"),
+        ("META_PAGE_ID", "Facebook Page id (creative must attach to a Page)",
+         "https://business.facebook.com/settings/pages"),
+    ]
+    for key, label, url in specs:
+        _prompt_env_secret(key, label, url, _me.META_ENV_PATH, console)
+
+
+def _adbuyer_summary(console: Console) -> None:
+    """Presence-only recap (booleans, never values) + the exact next commands."""
+    from .agents.adbuyer import meta_env as _me
+    from .agents.adbuyer.creative import creds as _cc
+
+    cfg = cfg_module.load()
+    d = _cc.describe(cfg)
+    m = _me.describe(_me.load_meta(cfg))
+    meta_ready = all(m.values())
+
+    def mark(b: bool) -> str:
+        return "[green]✓[/green]" if b else "[dim]—[/dim]"
+
+    console.print("\n[bold]You're set up.[/bold]  [dim](presence only — no keys are shown)[/dim]\n")
+    t = Table(show_header=False, box=None, pad_edge=False, padding=(0, 2))
+    t.add_column("k", style="dim", no_wrap=True)
+    t.add_column("v")
+    t.add_row(
+        "Veto account",
+        "[green]signed in[/green]" if cfg.api_key else "[yellow]local mode[/yellow]  [dim](sign in for signed receipts + live spend)[/dim]",
+    )
+    t.add_row("Brain (LLM)", f"[cyan]{cfg.llm_provider}[/cyan] · {cfg.llm_model or '—'}")
+    t.add_row(
+        "Image",
+        mark(d["openai_image"]) + ("  [dim]OpenAI[/dim]" if d["openai_image"] else "  [dim]free fal.ai x402 fallback[/dim]"),
+    )
+    t.add_row("Video", mark(d["higgsfield_video"]) + ("  [dim]Higgsfield[/dim]" if d["higgsfield_video"] else "  [dim]optional[/dim]"))
+    t.add_row("Voice", mark(d["elevenlabs_voice"]) + ("  [dim]ElevenLabs[/dim]" if d["elevenlabs_voice"] else "  [dim]optional[/dim]"))
+    t.add_row(
+        "Meta ads",
+        "[green]connected[/green]" if meta_ready else "[yellow]not connected[/yellow]  [dim](use --mock to try without an account)[/dim]",
+    )
+    t.add_row(
+        "Wallet",
+        "[green]connected[/green]" if cfg.wallet_address else "[dim]not set — decision-only until funded[/dim]",
+    )
+    day = _read_policy_scalar("adbuyer.yaml", "per_day_usd", 150.0)
+    cap = _read_policy_scalar("adbuyer-creative.yaml", "per_transaction_usd", 0.50)
+    t.add_row("Guardrails", f"[bold]${day:,.2f}/day[/bold] ad budget · [bold]${cap:,.2f}[/bold] per creative")
+    console.print(t)
+
+    console.print("\n[bold]Next — try it:[/bold]")
+    console.print(
+        '  [cyan]veto-agents create "premium cold-brew for busy founders, launch week"[/cyan]'
+        "   [dim]creative only — no Meta needed[/dim]"
+    )
+    console.print(
+        '  [cyan]veto-agents adbuyer --goal "US traffic to https://mysite.com, keep CPC under $1" --once --mock[/cyan]'
+        "   [dim]full loop, no real spend[/dim]"
+    )
+    console.print(
+        "  [cyan]claude mcp add veto-agents -- veto-agents mcp[/cyan]"
+        "   [dim]drive it from Claude Code[/dim]\n"
+    )
+
+
+@app.command("adbuyer-setup")
+def adbuyer_setup(
+    ctx: typer.Context,
+    non_interactive: bool = typer.Option(
+        False, "--non-interactive", "-n",
+        help="No prompts. Reads answers from flags + env vars (see below). Great "
+             "for scripts/CI. Secrets are read from their normal env-var names "
+             "(OPENAI_API_KEY, META_ACCESS_TOKEN, …) — never passed as flags.",
+    ),
+    llm_provider: Optional[str] = typer.Option(
+        None, "--llm-provider",
+        help="Brain to use (claude / openai / ollama / hermes / …). "
+             "Default: claude. Env: VETO_SETUP_LLM_PROVIDER.",
+    ),
+    daily_budget: Optional[float] = typer.Option(
+        None, "--daily-budget",
+        help="Daily ad budget in USD → caps.per_day_usd. Env: VETO_SETUP_DAILY_BUDGET.",
+    ),
+    creative_cap: Optional[float] = typer.Option(
+        None, "--creative-cap",
+        help="Max USD per creative generation → creative caps.per_transaction_usd. "
+             "Env: VETO_SETUP_CREATIVE_CAP.",
+    ),
+    skip_login: bool = typer.Option(
+        False, "--skip-login", help="Skip the Veto sign-in step. Env: VETO_SETUP_SKIP_LOGIN=1.",
+    ),
+    skip_wallet: bool = typer.Option(
+        False, "--skip-wallet", help="Skip the optional funding-wallet handoff. Env: VETO_SETUP_SKIP_WALLET=1.",
+    ),
+) -> None:
+    """Guided setup for the Veto-governed ad / media buyer.
+
+    Walks you through, one step at a time: sign in → pick a brain (LLM) →
+    optional creative providers (image/video/voice) → optional Meta ad account
+    → budget guardrails. Each step explains what it's for and where to get the
+    value, and writes to the right place (config, ~/.veto/creative.env,
+    ~/.veto/meta.env, policy caps) with 0600 perms. No secret is ever printed.
+
+    Scriptable / non-interactive:
+      veto-agents adbuyer-setup -n --llm-provider claude --daily-budget 25 --creative-cap 0.25
+
+    In -n mode, secrets are read from their normal env-var names, e.g.:
+      ANTHROPIC_API_KEY / OPENAI_API_KEY / ELEVENLABS_API_KEY
+      HIGGSFIELD_API_KEY + HIGGSFIELD_API_SECRET (or HIGGSFIELD_CREDENTIALS)
+      META_ACCESS_TOKEN / META_AD_ACCOUNT_ID / META_PAGE_ID
+    """
+    # Resolve non-interactive + skips from flags OR env (flags win when set).
+    if _env_truthy("VETO_SETUP_NONINTERACTIVE"):
+        non_interactive = True
+    skip_login = skip_login or _env_truthy("VETO_SETUP_SKIP_LOGIN")
+    skip_wallet = skip_wallet or _env_truthy("VETO_SETUP_SKIP_WALLET")
+    if llm_provider is None:
+        llm_provider = os.environ.get("VETO_SETUP_LLM_PROVIDER") or None
+    if daily_budget is None and os.environ.get("VETO_SETUP_DAILY_BUDGET"):
+        try:
+            daily_budget = float(os.environ["VETO_SETUP_DAILY_BUDGET"])
+        except ValueError:
+            pass
+    if creative_cap is None and os.environ.get("VETO_SETUP_CREATIVE_CAP"):
+        try:
+            creative_cap = float(os.environ["VETO_SETUP_CREATIVE_CAP"])
+        except ValueError:
+            pass
+
+    banner.render(console, subtitle="Ad-buyer setup")
+    console.print(
+        "[bold]Let's get your Veto-governed ad buyer running.[/bold]  "
+        "[dim]One step at a time — most steps are optional and skippable.[/dim]"
+    )
+
+    cfg = cfg_module.load()
+
+    # ── Step 0 — make sure the agent + its two policies are installed ──
+    if "adbuyer" not in cfg.installed_agents:
+        console.print("\n[dim]Installing the adbuyer agent + its policies…[/dim]")
+        ctx.invoke(install, name="adbuyer", skip_creds=True, no_banner=True)
+        cfg = cfg_module.load()
+
+    # ── Step 1 — Veto sign-in ──
+    console.print("\n[bold]Step 1 — Sign in to Veto[/bold]")
+    console.print(
+        "  [dim]Why: Veto authorizes every spend and signs a receipt. This is the "
+        "account those receipts belong to.[/dim]"
+    )
+    if cfg.api_key:
+        console.print(f"  [green]✓[/green] Already signed in as [cyan]{cfg.email or cfg.agent_id}[/cyan].")
+    elif skip_login or non_interactive:
+        console.print(
+            "  [yellow]·[/yellow] Sign-in skipped. Live spends need an account — run "
+            "[cyan]veto-agents login[/cyan] later. You can still use [cyan]--mock[/cyan]/[cyan]--dry-run[/cyan]."
+        )
+    else:
+        if _do_login(console, cfg):
+            _render_signed_in(console, cfg)
+        cfg = cfg_module.load()
+        if not cfg.api_key:
+            console.print(
+                "  [yellow]·[/yellow] No account yet — continuing so you can configure the rest. "
+                "Sign in later for live spends."
+            )
+
+    # ── Step 2 — Brain (LLM): the thing that thinks. Must be right. ──
+    console.print("\n[bold]Step 2 — Pick the brain (LLM)[/bold]")
+    console.print(
+        "  [dim]Why: the director LLM turns your brief into ad copy + one coherent "
+        "creative concept, and the buyer LLM reads performance and decides budget "
+        "moves. Required for the agent to think.[/dim]\n"
+    )
+    provider = _choose_llm_provider(cfg, llm_provider, non_interactive, console)
+    cfg.llm_provider = provider.name
+    if provider.name == "custom":
+        endpoint = os.environ.get("VETO_SETUP_LLM_ENDPOINT")
+        model = os.environ.get("VETO_SETUP_LLM_MODEL")
+        if not non_interactive:
+            endpoint = (
+                Prompt.ask("  Custom endpoint URL (OpenAI-compatible)", default=cfg.llm_endpoint or endpoint or "").strip()
+                or endpoint
+            )
+            model = Prompt.ask("  Model name (e.g. llama3.1:70b)", default=cfg.llm_model or model or "").strip() or model
+        if endpoint:
+            cfg.llm_endpoint = endpoint
+        if model:
+            cfg.llm_model = model
+    else:
+        cfg.llm_endpoint = provider.endpoint
+        cfg.llm_model = provider.default_model
+    cfg_module.save(cfg)  # non-secret provider/endpoint/model → config.yaml
+    console.print(
+        f"  [green]✓[/green] Brain: [cyan]{cfg.llm_provider}[/cyan] · model "
+        f"[cyan]{cfg.llm_model or '—'}[/cyan]  [dim]→ config.yaml[/dim]"
+    )
+    _persist_provider_key(provider, cfg, non_interactive, console)
+
+    # ── Step 3 — Creative providers (optional) ──
+    console.print("\n[bold]Step 3 — Creative providers[/bold]  [dim](optional)[/dim]")
+    console.print(
+        "  [dim]Why: richer assets. All optional — with none set, images still "
+        "generate via free fal.ai over x402.[/dim]"
+    )
+    _collect_creative_keys(cfg, non_interactive, console)
+    d = __import__("veto_agents.agents.adbuyer.creative.creds", fromlist=["describe"]).describe(cfg_module.load())
+    console.print(
+        "  [bold]Studio can make:[/bold]  copy [green]✓[/green]  image [green]✓[/green]  "
+        f"video {'[green]✓[/green]' if d['higgsfield_video'] else '[dim]—[/dim]'}  "
+        f"voice {'[green]✓[/green]' if d['elevenlabs_voice'] else '[dim]—[/dim]'}"
+    )
+
+    # ── Step 4 — Meta ad account (optional) ──
+    console.print("\n[bold]Step 4 — Connect Meta (Facebook/Instagram) ads[/bold]  [dim](optional)[/dim]")
+    console.print(
+        "  [dim]Why: needed to launch REAL campaigns. Skip it and use [/dim][cyan]--mock[/cyan]"
+        "[dim] to run the whole observe→decide→Veto→act loop with no account and no spend.[/dim]"
+    )
+    _collect_meta_keys(cfg, non_interactive, console)
+
+    # ── Step 5 — Budget & guardrails ──
+    console.print("\n[bold]Step 5 — Budget & guardrails[/bold]")
+    console.print(
+        "  [dim]Why: Veto blocks any spend above these caps. Sensible defaults ship; "
+        "set your own daily ad budget + per-generation creative cap.[/dim]"
+    )
+    if non_interactive:
+        _patch_policy_caps(daily_budget, creative_cap, console)
+        if daily_budget is None and creative_cap is None:
+            console.print(
+                "  [dim]Keeping policy defaults. Edit with [/dim][cyan]veto-agents policy edit adbuyer[/cyan][dim].[/dim]"
+            )
+    else:
+        cur_day = _read_policy_scalar("adbuyer.yaml", "per_day_usd", 150.0)
+        cur_cap = _read_policy_scalar("adbuyer-creative.yaml", "per_transaction_usd", 0.50)
+        db = daily_budget
+        cc = creative_cap
+        if db is None:
+            try:
+                db = float(Prompt.ask("  Daily ad budget (USD)", default=f"{cur_day:.0f}"))
+            except ValueError:
+                db = None
+        if cc is None:
+            try:
+                cc = float(Prompt.ask("  Max USD per creative generation", default=f"{cur_cap:.2f}"))
+            except ValueError:
+                cc = None
+        _patch_policy_caps(db, cc, console)
+
+    # ── Wallet (optional handoff) ──
+    if not skip_wallet and not non_interactive and not cfg_module.load().wallet_address:
+        console.print("\n[bold]Wallet[/bold]  [dim](optional)[/dim]")
+        console.print(
+            "  [dim]Funds the Veto-guarded Safe that pays for creative micro-spends (x402). "
+            "Skip → decision-only until you fund it.[/dim]"
+        )
+        if cfg_module.load().api_key and Confirm.ask("  Set up a funding wallet now?", default=False):
+            wallet_setup_module.run(console)
+
+    # ── Finish ──
+    _adbuyer_summary(console)
+
+
 # ─── list ─────────────────────────────────────────────────────────────────
 
 
@@ -604,6 +1175,20 @@ def install(
         else:
             console.print(f"\n[yellow]·[/yellow] No bundled policy for {name} (placeholder).")
 
+        # adbuyer ships a SECOND, SEPARATE policy for creative micro-spends
+        # (adbuyer-creative) kept distinct from its ad-budget policy so a $0.01
+        # image isn't judged against a $50 budget cap. Install it alongside so
+        # `veto-agents policy edit adbuyer-creative` works.
+        if name == "adbuyer":
+            creative_policy = _bundled_subpolicy_path("adbuyer.creative")
+            if creative_policy is not None and creative_policy.is_file():
+                creative_user_policy = cfg_module.policies_dir() / "adbuyer-creative.yaml"
+                creative_user_policy.write_text(creative_policy.read_text())
+                console.print(
+                    f"[green]✓[/green] Creative policy installed → "
+                    f"[dim]{creative_user_policy}[/dim]"
+                )
+
     # ── Credential walkthrough ────────────────────────────────
     if entry.credentials and not skip_creds:
         _walk_credentials(entry, console)
@@ -620,6 +1205,7 @@ def install(
 
     example_prompt = {
         "media":    "make an image of a neon jellyfish in cyberpunk rain",
+        "adbuyer":  "US traffic campaign to https://mysite.com, $20/day",
         "build":    "deploy this repo to the cheapest provider",
         "research": "research the top 5 papers on agent governance in 2026",
         "inbox":    "triage my inbox from this week",
@@ -843,6 +1429,148 @@ def media(
 ) -> None:
     """Run the media agent against a brief."""
     _run_agent("media", prompt, yes=yes)
+
+
+@app.command()
+def adbuyer(
+    goal: str = typer.Option(
+        ..., "--goal", "-g",
+        help="Standing objective the buyer optimizes toward, e.g. "
+             "'US traffic to mysite.com, keep CPC under $1'.",
+    ),
+    interval: int = typer.Option(
+        0, "--interval", "-i", min=0,
+        help="Minutes between OBSERVE cycles (ignored with --once). "
+             "0 (default) = use the policy's ad_ops.observe_interval_minutes "
+             "(360). Observing is cheap; the readiness gate — not the interval — "
+             "is what prevents premature action.",
+    ),
+    once: bool = typer.Option(
+        False, "--once",
+        help="Run a single decide+authorize cycle and exit (no loop).",
+    ),
+    dry_run: bool = typer.Option(
+        False, "--dry-run",
+        help="Decide + run the Veto authorize gates but skip all Meta writes.",
+    ),
+    mock: bool = typer.Option(
+        False, "--mock",
+        help="Mimic Meta OFFLINE — no real ad account, no real spend. Runs the "
+             "full observe->decide->discipline->Veto->act loop against seeded, "
+             "evolving fake campaigns. The REAL Veto + discipline gates still run "
+             "on every action (decision_only is free). Great with no live "
+             "campaigns; add --no-llm to run with no model key either.",
+    ),
+    no_llm: bool = typer.Option(
+        False, "--no-llm",
+        help="Use the pure-rules heuristic brain instead of the LLM (no model "
+             "key required). Implied by --mock when no LLM key is configured.",
+    ),
+) -> None:
+    """Autonomous Veto-governed Meta (FB/IG) ad buyer.
+
+    Runs a decide -> authorize -> (optionally) act loop every --interval minutes
+    against a standing --goal. Every dollar is gated by Veto before Meta is
+    touched. Deploy once and walk away — Veto is the ongoing guardrail on the
+    agent's OWN decisions, not a per-command consent gate.
+
+    Examples:
+      veto-agents adbuyer --goal "US traffic to https://mysite.com, keep CPC under $1"
+      veto-agents adbuyer -g "grow signups, cap $150/day" --once --dry-run
+      veto-agents adbuyer -g "grow signups, US, up to $30/day" --mock --once
+    """
+    cfg = cfg_module.load()
+    # --mock mimics Meta with no account, so the Meta-creds/entity setup a real
+    # run needs doesn't apply — but sign-in is still required (real Veto gate).
+    if not mock and "adbuyer" not in cfg.installed_agents:
+        console.print(
+            "[red]✗[/red] [bold]adbuyer[/bold] is not installed. "
+            "Run [cyan]veto-agents install adbuyer[/cyan] first."
+        )
+        raise typer.Exit(1)
+
+    from .agents.adbuyer.agent import run_daemon
+    run_daemon(
+        cfg,
+        console,
+        goal=goal,
+        interval_minutes=interval,
+        once=once,
+        dry_run=dry_run,
+        mock=mock,
+        no_llm=no_llm,
+    )
+
+
+@app.command()
+def create(
+    brief: str = typer.Argument(
+        ..., help="Product/campaign brief to build a creative ad package from."
+    ),
+    image_provider: str = typer.Option(
+        "openai", "--image-provider",
+        help="Hero image provider: 'openai' (BYO OPENAI_API_KEY) or 'fal' "
+             "(free x402). 'openai' falls back to 'fal' automatically if no key.",
+    ),
+    video: Optional[bool] = typer.Option(
+        None, "--video/--no-video",
+        help="Include a hero video (Higgsfield, BYO key). Default: auto — "
+             "on only if a Higgsfield key is configured.",
+    ),
+    voice: Optional[bool] = typer.Option(
+        None, "--voice/--no-voice",
+        help="Include a voiceover (ElevenLabs, BYO key). Default: auto — "
+             "on only if an ElevenLabs key is configured.",
+    ),
+    all_assets: bool = typer.Option(
+        False, "--all",
+        help="Attempt every asset (copy+image+video+voice). Missing-key assets "
+             "still skip cleanly with a note.",
+    ),
+    out: str = typer.Option(
+        None, "--out",
+        help="Output root folder (default: ~/Downloads/veto-studio/).",
+    ),
+) -> None:
+    """Standalone creative studio — turn a brief into a coherent ad package.
+
+    Runs the LLM creative DIRECTOR → copy + hero image (+ optional video/voice),
+    all derived from ONE creative concept so every asset matches. Each PAID
+    generation is gated by Veto BEFORE the provider is called (deny/escalate →
+    skip + receipt). NO Meta credentials required — this is the creative stage;
+    placing the ad on Meta is a separate, later step.
+
+    Keys are BYO, read from ~/.veto/creative.env (or env / keychain):
+      OPENAI_API_KEY, HIGGSFIELD_API_KEY + HIGGSFIELD_API_SECRET, ELEVENLABS_API_KEY.
+    The director needs ANTHROPIC_API_KEY. Missing keys degrade gracefully.
+
+    Examples:
+      veto-agents create "premium cold-brew coffee for busy founders, launch week"
+      veto-agents create "eco running shoe" --image-provider fal --no-video
+      veto-agents create "SaaS onboarding tool" --all
+    """
+    from pathlib import Path as _Path
+
+    from .agents.adbuyer.creative import creds as creative_creds, studio
+
+    cfg = cfg_module.load()
+    d = creative_creds.describe(cfg)
+    want = ["copy", "image"]
+    inc_video = all_assets or (video if video is not None else d["higgsfield_video"])
+    inc_voice = all_assets or (voice if voice is not None else d["elevenlabs_voice"])
+    if inc_video:
+        want.append("video")
+    if inc_voice:
+        want.append("voice")
+
+    studio.run(
+        brief,
+        cfg,
+        console,
+        want=tuple(want),
+        image_provider=image_provider,
+        out_root=_Path(out) if out else None,
+    )
 
 
 @app.command()
@@ -1116,6 +1844,34 @@ def receipts() -> None:
     )
 
 
+# ─── mcp server ──────────────────────────────────────────────────────────
+
+
+@app.command()
+def mcp() -> None:
+    """Run the veto-agents MCP server over stdio.
+
+    Exposes the media-buyer agent as Model Context Protocol tools so any MCP
+    host (Claude Code, Claude Desktop, OpenClaw) can drive it —
+    create_ad_creative, run_ad_cycle, get_campaigns. Veto governs every spend
+    INSIDE each tool (fail-closed); the host LLM cannot bypass it. See docs/MCP.md.
+
+    Wire it up (Claude Code):  claude mcp add veto-agents -- veto-agents mcp
+    """
+    # Lazy import so the rest of the CLI doesn't pull in the MCP SDK (or the
+    # studio/controller graph) unless the server is actually launched.
+    try:
+        from .mcp_server import main as _run
+    except ModuleNotFoundError as e:
+        console.print(
+            "[red]✗[/red] The MCP server needs the Model Context Protocol SDK.\n"
+            "  Install it with: [cyan]pip install 'veto-agents[mcp]'[/cyan]  "
+            f"[dim](missing: {e.name})[/dim]"
+        )
+        raise typer.Exit(1)
+    _run()
+
+
 # ─── helpers ─────────────────────────────────────────────────────────────
 
 
@@ -1124,6 +1880,16 @@ def _bundled_policy_path(name: str):
     from importlib.resources import files
     try:
         return files(f"veto_agents.agents.{name}").joinpath("policy.yaml")
+    except (ModuleNotFoundError, FileNotFoundError):
+        return None  # type: ignore[return-value]
+
+
+def _bundled_subpolicy_path(subpkg: str):
+    """Path to a bundled policy.yaml shipped inside a SUB-package of an agent,
+    e.g. `adbuyer.creative` → veto_agents/agents/adbuyer/creative/policy.yaml."""
+    from importlib.resources import files
+    try:
+        return files(f"veto_agents.agents.{subpkg}").joinpath("policy.yaml")
     except (ModuleNotFoundError, FileNotFoundError):
         return None  # type: ignore[return-value]
 

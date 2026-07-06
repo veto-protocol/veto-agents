@@ -11,7 +11,8 @@ caps:
   human_approval_above_usd: 1.50
 
 allowlist_merchants:
-  - fal.x402.paysponge.com   # keyless image/video gen over x402 (default)
+  - fal.x402.paysponge.com   # keyless image gen over x402 (default)
+  - api.xona-agent.com       # keyless voice/video/music over x402 (Xona-agent family)
   - replicate.com
   - api.runwayml.com
   - api.elevenlabs.io

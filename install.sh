@@ -120,6 +120,11 @@ cat <<EOF
 
   ${DIM}You pick one agent to start. You can add more anytime.${RESET}
 
+  ${DIM}Want the ad / media buyer? Its guided setup walks you through the${RESET}
+  ${DIM}brain (LLM), creative providers, Meta, and budget — one step at a time:${RESET}
+
+    ${CYAN}veto-agents adbuyer-setup${RESET}
+
 EOF
 
 # ── PATH check ────────────────────────────────────────────────────
@@ -152,7 +157,8 @@ if [ -e /dev/tty ] && command -v veto-agents >/dev/null 2>&1; then
         ;;
       *)
         printf '\n  No rush. When you are ready:\n\n'
-        printf '    %sveto-agents%s\n\n' "$CYAN" "$RESET"
+        printf '    %sveto-agents%s               %spick any agent%s\n' "$CYAN" "$RESET" "$DIM" "$RESET"
+        printf '    %sveto-agents adbuyer-setup%s  %sguided ad / media buyer setup%s\n\n' "$CYAN" "$RESET" "$DIM" "$RESET"
         exit 0
         ;;
     esac
@@ -162,14 +168,15 @@ fi
 # Fallback (no TTY, or PATH issue) — give the user a clear next step.
 if $ON_PATH; then
   printf '  When you are ready, run:\n\n'
-  printf '    %sveto-agents%s\n\n' "$CYAN" "$RESET"
+  printf '    %sveto-agents%s               %spick any agent%s\n' "$CYAN" "$RESET" "$DIM" "$RESET"
+  printf '    %sveto-agents adbuyer-setup%s  %sguided ad / media buyer setup%s\n\n' "$CYAN" "$RESET" "$DIM" "$RESET"
 else
   printf '  %sOne more thing.%s Your shell needs to pick up the new binary.\n' "$BOLD" "$RESET"
   if [ -n "$RC_FILE" ]; then
     printf '  Open a new terminal tab, or run:\n\n'
-    printf '    %ssource %s && veto-agents%s\n\n' "$CYAN" "$RC_FILE" "$RESET"
+    printf '    %ssource %s && veto-agents adbuyer-setup%s\n\n' "$CYAN" "$RC_FILE" "$RESET"
   else
     printf '  Open a new terminal tab, then run:\n\n'
-    printf '    %sveto-agents%s\n\n' "$CYAN" "$RESET"
+    printf '    %sveto-agents adbuyer-setup%s\n\n' "$CYAN" "$RESET"
   fi
 fi

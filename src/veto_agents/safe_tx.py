@@ -23,9 +23,12 @@ from dataclasses import dataclass
 
 try:
     from eth_hash.auto import keccak as _keccak  # type: ignore
-except ImportError:  # pragma: no cover — eth_hash is in veto-agents' deps but be defensive
+except ImportError:  # pragma: no cover — eth_hash ships only in the `dev` extra (test-only)
     def _keccak(b: bytes) -> bytes:
-        raise RuntimeError("eth_hash not installed; install with: pip install eth-hash")
+        raise RuntimeError(
+            "eth_hash not installed; it is a test-only dep — "
+            "install with: pip install 'veto-agents[dev]'"
+        )
 
 
 # Selectors / typehashes — must agree byte-for-byte with VetoGuard.sol

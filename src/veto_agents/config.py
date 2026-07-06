@@ -90,6 +90,14 @@ class Config:
     client_id: str | None = None
     email: str | None = None
 
+    # Optional SECOND agent identity for the separate creative policy
+    # (adbuyer-creative). The server keys policy by agent_id, so when this is
+    # set the per-generation creative micro-spends (fal / openai / higgsfield /
+    # elevenlabs) are governed by their OWN caps, while the controller's
+    # ad-budget decisions stay on `agent_id` (adbuyer-ad-spend). Falls back to
+    # `agent_id` when unset, so existing single-policy installs keep working.
+    creative_agent_id: str | None = None
+
     # Default policy posture: "strict" | "balanced" | "permissive". Affects
     # the caps the user gets when installing a new agent (the policy file
     # ships with sensible defaults; this multiplier loosens/tightens them).

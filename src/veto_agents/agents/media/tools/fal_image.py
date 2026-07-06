@@ -95,9 +95,13 @@ def generate(
     from veto_agents.wallet_setup import fetch_account_wallet
     wallet = fetch_account_wallet(cfg) or {}
 
+    # Governed by the CREATIVE policy when a dedicated creative agent id is set
+    # (per-image micro-spend caps), else the account's single agent id.
+    creative_agent_id = getattr(cfg, "creative_agent_id", None) or cfg.agent_id
+
     ctx = AdapterContext(
         veto_api_key=cfg.api_key,
-        veto_agent_id=cfg.agent_id,
+        veto_agent_id=creative_agent_id,
         veto_base_url=getattr(cfg, "veto_api_base", "https://veto-ai.com").removesuffix("/api/v1").rstrip("/"),
         privy_wallet_id=wallet.get("privy_wallet_id", "") or "",
         wallet_address=wallet.get("owner_address", "") or "",

@@ -1,0 +1,53 @@
+policy_name: adbuyer-creative
+policy_version: 1
+description: |
+  CREATIVE policy for the ad-buyer's creative studio + the media agent's image
+  tool. This governs pay-per-use GENERATION micro-spends (fal.ai x402, OpenAI
+  gpt-image-1, Higgsfield video, ElevenLabs voice) — NOT ad budgets. Those live
+  in the separate ad-spend policy (../policy.yaml → adbuyer-ad-spend).
+
+  Why separate: a creative asset costs cents ($0.01 flux image, ~$0.17 gpt-image,
+  ~$0.50 video), so the caps here are per-ASSET ceilings and a small daily
+  creative budget — not the $50/tx, $150/day ad-budget bars. One policy judging
+  both would either wave through a runaway image loop or block a normal budget
+  change. Route the creative gate at cfg.creative_agent_id; the controller's ad
+  decisions stay on cfg.agent_id. Tune via `veto-agents policy edit adbuyer-creative`.
+
+caps:
+  per_transaction_usd: 0.50         # ceiling for a single image/video/voice asset
+  per_day_usd: 10.00                # daily creative-generation budget
+  per_month_usd: 100.00
+  human_approval_above_usd: 1.00    # any single asset over $1 -> escalate
+
+allowlist_merchants:
+  - fal.x402.paysponge.com     # keyless image gen over x402 (flux)
+  - api.openai.com             # gpt-image-1 (BYO key)
+  - platform.higgsfield.ai     # Higgsfield DoP video (BYO key)
+  - api.elevenlabs.io          # ElevenLabs text-to-speech (BYO key)
+
+blocklist_merchants: []
+
+time_windows:
+  active_hours: "always"
+
+rate_limits:
+  # Many small assets per package (image + variants + video + voice), so the
+  # count caps are higher than the ad-budget policy's.
+  txs_per_hour: 60
+  txs_per_day: 200
+
+categories:
+  allow:
+    - media_generation
+    - ai_inference
+  block:
+    - advertising            # budget decisions are NOT a creative micro-spend
+
+intent_keywords:
+  forbidden:
+    # Content-safety words that belong on the GENERATION gate (what the image /
+    # video model is asked to produce). Ad-placement words (political / housing)
+    # live on the ad-spend gate instead — see ../policy.yaml.
+    - nsfw
+    - celebrity_likeness
+    - minors

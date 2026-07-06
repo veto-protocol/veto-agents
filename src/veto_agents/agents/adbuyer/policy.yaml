@@ -1,0 +1,72 @@
+policy_name: adbuyer-ad-spend
+policy_version: 2
+description: |
+  AD-SPEND policy for the Veto ad-buyer agent's control loop. This governs the
+  ad-BUDGET decisions the controller makes (adjust_budget / pause / resume) plus
+  the ad-ops discipline — NOT the per-image creative micro-spends. Those live in
+  a SEPARATE policy (creative/policy.yaml → adbuyer-creative) so a $0.01 image
+  can't be judged against a $50 budget cap and vice-versa.
+
+  Ad budgets move real money, so a human-approval threshold makes the "control
+  spending" aha visible: a $20/day plan is allowed, a $500/day plan escalates to
+  a human. Tune via `veto-agents policy edit adbuyer`.
+
+caps:
+  per_transaction_usd: 50.00        # a single budget/cap decision up to $50
+  per_day_usd: 150.00               # total ad-related authorizations per day
+  per_month_usd: 2000.00
+  human_approval_above_usd: 100.00  # any single decision over $100 -> escalate
+
+allowlist_merchants:
+  - facebook.com               # Meta ad-budget authorization (agent passes this)
+  - graph.facebook.com         # Meta Marketing API host
+
+blocklist_merchants: []
+
+time_windows:
+  active_hours: "always"
+
+rate_limits:
+  txs_per_hour: 20
+  txs_per_day: 60
+
+categories:
+  allow:
+    - advertising
+  block:
+    - finance
+    - crypto_transfer
+    - gambling
+
+intent_keywords:
+  forbidden:
+    # Ad-placement / compliance words that belong on the BUDGET gate (Meta
+    # special_ad_categories). Content-safety words (nsfw / minors / …) live on
+    # the creative-generation gate instead — see creative/policy.yaml.
+    - political            # special_ad_categories compliance — keep ads simple
+    - housing_discrimination
+
+behavior:
+  require_plan_preview: true
+  require_per_step_estimate: true
+  require_post_action_receipt_link: true
+
+# ── ad-ops discipline ("patience") ────────────────────────────────────────
+# These do NOT move money — they make the autonomous loop behave like a real
+# Meta media buyer instead of a twitchy bot. A CODE-enforced readiness gate
+# runs BEFORE the Veto authorize gate: it HOLDS (does nothing) unless an ad set
+# has left the learning phase, delivered enough days + data, and is past its
+# per-entity cooldown. Observing is cheap and frequent; acting is rare and only
+# on stable, significant data. HOLD is the default, valid outcome. `pause` is
+# exempt from the learning/data checks (killing a runaway ad set is allowed
+# anytime) but still respects the cooldown. Tune via `veto-agents policy edit
+# adbuyer`.
+ad_ops:
+  respect_learning_phase: true      # never touch an ad set Meta marks LEARNING
+  min_days_before_action: 4         # let it deliver >= 4 days before judging it
+  min_conversions_before_action: 50 # …or gate on volume instead of age…
+  min_impressions_before_action: 2000  # …meet EITHER conversions OR impressions
+  cooldown_days_per_entity: 3       # >= 3 days between agent actions on one entity
+  max_budget_change_pct: 20         # clamp any budget change to +/- 20% of current
+  observe_interval_minutes: 360     # default OBSERVE cadence (the gate, not the
+                                    # interval, is what prevents premature action)

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "veto-agents"
-version = "0.0.24"
+version = "0.0.25"
 description = "AI agents that pay for things on your behalf, with the safety built in. Hermes-core, governed by Veto."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -44,9 +44,22 @@ hermes = ["hermes-agent>=0.2.0"]
 # Optional per-agent extras. Users install only what they need:
 #   pipx install 'veto-agents[groups]'
 groups = ["python-telegram-bot>=22.0", "anthropic>=0.40"]
-media = ["anthropic>=0.40"]
-all = ["python-telegram-bot>=22.0", "anthropic>=0.40"]
-dev = ["pytest>=8.0", "pytest-asyncio>=0.23", "ruff>=0.6"]
+# The shared structured-output client (veto_agents.structured_llm) is
+# provider-agnostic: Anthropic via the `anthropic` SDK, and every
+# OpenAI-compatible provider (OpenAI, OpenRouter, Hermes/Nous — the DEFAULT —
+# Grok, Kimi, DeepSeek, local) via the `openai` SDK. Ship BOTH so the default
+# Hermes brain and any picked provider work on a clean install (this extra is
+# exactly what structured_llm's "SDK not installed" hint tells users to install).
+media = ["anthropic>=0.40", "openai>=1.40"]
+# MCP server (`veto-agents mcp`) — drops the media buyer into Claude Code /
+# Claude Desktop / OpenClaw over stdio. FastMCP ships inside the official `mcp`
+# package (mcp.server.fastmcp); 1.2 is the minimum that bundles it.
+mcp = ["mcp>=1.2"]
+all = ["python-telegram-bot>=22.0", "anthropic>=0.40", "openai>=1.40", "mcp>=1.2"]
+# `eth-hash` is a test-only dep: tests/test_safe_tx.py imports veto_agents.safe_tx,
+# which keccak-hashes SafeTx structs. Not on any runtime hot path, so it stays out
+# of the core deps and lives here so `pip install 'veto-agents[dev]'` + pytest is green.
+dev = ["pytest>=8.0", "pytest-asyncio>=0.23", "ruff>=0.6", "mcp>=1.2", "eth-hash[pycryptodome]>=0.6"]
 
 [project.urls]
 Homepage = "https://veto-ai.com"

@@ -24,7 +24,7 @@ from rich.console import Console
 from rich.prompt import Prompt
 from rich.table import Table
 
-from ...veto_client import AuthorizeResult, VetoClient
+from ...veto_client import VetoClient
 from .tools import fal_image
 
 
@@ -96,22 +96,15 @@ class Step:
 def _classify_brief(prompt: str) -> list[Step]:
     """v0.0.1 heuristic: pick steps based on keywords in the brief.
 
-    v0.0.2 will replace this with a real LLM-driven planner that produces
-    these step entries from any prompt.
+    This build wires ONLY the keyless x402 image tool (fal.ai). Image briefs map
+    to it directly; video / voice / music briefs fall through to the same image
+    step (those providers are not wired here — the creative studio covers them
+    with BYO-key providers). v0.0.2 replaces this with a real LLM-driven planner.
     """
     p = prompt.lower()
     steps: list[Step] = []
 
-    if any(w in p for w in ("video", "clip", "motion", "animation")):
-        steps.append(
-            Step(
-                label="Generate video — Runway Gen-3",
-                merchant="api.runwayml.com",
-                est_usd=0.42,
-                tool_name="runway.video_gen",
-            )
-        )
-    elif any(w in p for w in ("image", "picture", "photo", "logo", "icon", "shot")):
+    if any(w in p for w in ("image", "picture", "photo", "logo", "icon", "shot")):
         steps.append(
             Step(
                 label="Generate image — fal.ai (FLUX Schnell) over x402",
@@ -122,17 +115,7 @@ def _classify_brief(prompt: str) -> list[Step]:
             )
         )
 
-    if any(w in p for w in ("voice", "voiceover", "narration", "speech", "say")):
-        steps.append(
-            Step(
-                label="Synthesize voiceover — ElevenLabs",
-                merchant="api.elevenlabs.io",
-                est_usd=0.05,
-                tool_name="elevenlabs.voice",
-            )
-        )
-
-    # Fall through: if we couldn't detect what they want, default to an image.
+    # Fall through: if we couldn't detect an image request, default to one.
     if not steps:
         steps.append(
             Step(
@@ -316,78 +299,42 @@ def run(prompt: str, *, cfg, console: Console, auto_confirm: bool = False) -> No
     agent_id = cfg.agent_id
 
     actual_total = 0.0
+    # Every tool is now wired the same governed x402 way: <tool>.generate()
+    # calls Veto authorize (which SIGNS the payment on allow) and pays the
+    # merchant over x402. The agent holds no key — deny/escalate => no payment.
+    TOOL_DISPATCH = {
+        "fal.image_gen": fal_image,
+    }
     try:
         for i, s in enumerate(steps, 1):
             console.print(f"[bold cyan]Step {i}/{len(steps)}[/bold cyan] · {s.label}")
 
-            if s.tool_name == "fal.image_gen":
-                # Governed x402 spend. fal_image.generate calls Veto authorize
-                # (which also SIGNS the payment on allow) and pays fal.ai over
-                # x402. The agent holds no key — if Veto denies/escalates, no
-                # payment happens. This is the thin-agent / control-in-Veto path.
-                tool_result = fal_image.generate(
-                    prompt=prompt, model=s.model or "flux-schnell",
-                    endpoint=s.endpoint, est_usd=s.est_usd, cfg=cfg,
-                )
-                if tool_result.denied:
-                    console.print(f"  [red]✗ blocked by Veto[/red] · {tool_result.error}")
-                    if tool_result.receipt_url:
-                        console.print(f"  [dim]receipt: {tool_result.receipt_url}[/dim]")
-                    return
-                if not tool_result.ok:
-                    console.print(f"  [red]✗ tool failed[/red]")
-                    console.print(f"  [dim]{tool_result.error}[/dim]")
-                    return
-                actual_total += tool_result.actual_cost_usd
-                console.print(
-                    f"  [green]✓ paid + done[/green] · ${tool_result.actual_cost_usd:.4f} "
-                    f"· file [cyan]{tool_result.output_path}[/cyan]"
-                )
+            tool = TOOL_DISPATCH.get(s.tool_name)
+            if tool is None:
+                console.print(f"  [red]✗ unknown tool[/red] {s.tool_name}")
+                return
+
+            kwargs = dict(prompt=prompt, model=s.model, endpoint=s.endpoint,
+                          est_usd=s.est_usd, cfg=cfg)
+            tool_result = tool.generate(**kwargs)
+
+            if tool_result.denied:
+                console.print(f"  [red]✗ blocked by Veto[/red] · {tool_result.error}")
                 if tool_result.receipt_url:
                     console.print(f"  [dim]receipt: {tool_result.receipt_url}[/dim]")
-                continue
-
-            # Video / voice are still stubbed — legacy authorize-only path
-            # until their x402 endpoints are wired the same way as images.
-            try:
-                result: AuthorizeResult = client.authorize(
-                    agent_id=agent_id,
-                    action="tool_execution",
-                    merchant=s.merchant,
-                    amount=s.est_usd,
-                    currency="USD",
-                    description=f"{s.tool_name}: {prompt[:120]}",
-                    context={
-                        "source": "veto-agents-media", "intent": prompt,
-                        "tool_name": s.tool_name, "step": i, "of": len(steps),
-                    },
-                )
-            except Exception as e:
-                console.print(f"  [red]✗ Veto authorize failed:[/red] {e}")
-                console.print("  [dim]Stopping. No paid action taken.[/dim]\n")
                 return
-            if result.verdict == "deny":
-                console.print(
-                    f"  [red]✗ denied by Veto[/red] · reason: "
-                    f"{', '.join(result.reason_codes) or 'policy'}"
-                )
+            if not tool_result.ok:
+                console.print(f"  [red]✗ tool failed[/red]")
+                console.print(f"  [dim]{tool_result.error}[/dim]")
                 return
-            if result.verdict == "escalate":
-                console.print(
-                    f"  [yellow]· escalated[/yellow] — needs your approval. "
-                    f"Receipt: {result.receipt_url}"
-                )
-                return
+            actual_total += tool_result.actual_cost_usd
             console.print(
-                f"  [green]✓ allowed[/green] by Veto"
-                + (f" · receipt {result.receipt_url}" if result.receipt_url else "")
+                f"  [green]✓ paid + done[/green] · ${tool_result.actual_cost_usd:.4f} "
+                f"· file [cyan]{tool_result.output_path}[/cyan]"
             )
-            actual = s.est_usd
-            actual_total += actual
-            console.print(
-                f"  [yellow]·[/yellow] tool call stubbed for [dim]{s.tool_name}[/dim] "
-                f"· est-cost ${actual:.2f}"
-            )
+            if tool_result.receipt_url:
+                console.print(f"  [dim]receipt: {tool_result.receipt_url}[/dim]")
+            continue
     finally:
         if client is not None:
             client.close()
