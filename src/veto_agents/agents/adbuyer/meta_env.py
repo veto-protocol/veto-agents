@@ -81,11 +81,19 @@ def describe(meta: dict) -> dict[str, bool]:
     }
 
 
-def missing(meta: dict) -> list[str]:
-    """Env-var names that still need to be set (page_id required for creatives)."""
+def missing(meta: dict, *, need_page: bool = False) -> list[str]:
+    """Env-var names that still need to be set.
+
+    META_PAGE_ID is only needed for CREATIVE work (uploading/attaching ad
+    creative needs a Facebook Page). Observing campaigns and adjusting
+    budgets/statuses — the core autonomous loop — does not. Pass
+    need_page=True only where a creative is actually being built; without a
+    page the loop still runs and simply refuses refresh_creative actions.
+    """
     want = {
         "META_ACCESS_TOKEN": meta.get("access_token"),
         "META_AD_ACCOUNT_ID": meta.get("ad_account_id"),
-        "META_PAGE_ID": meta.get("page_id"),
     }
+    if need_page:
+        want["META_PAGE_ID"] = meta.get("page_id")
     return [k for k, v in want.items() if not v]

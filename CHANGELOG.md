@@ -59,3 +59,14 @@ dollar moves**, and a code-enforced ad-ops discipline gate bounds the downside.
   `false` — budget sharing between ad sets would blur the agent's ±20%
   per-adset clamp guarantees. Found by the first live write test against
   the real Marketing API.
+### Also in 0.0.26
+- controller: magnitude clamp could round a budget change UP past ±20% by a
+  cent (e.g. +20.005%) — now clamps in integer cents (floor/ceil at the band
+  edge). Found by the new simulation harness's invariant sweep.
+- controller/meta_env: META_PAGE_ID is now OPTIONAL for the autonomous loop —
+  only creative refresh needs a Page; without one the loop runs and refuses
+  refresh_creative with a clear reason.
+- NEW tests/sim: accelerated stochastic simulation harness — 6 adversarial
+  scenarios × seeds × 30 sim-days (900 cycles in ~3.5s), machine-checked
+  governance invariants (±20% clamp, cooldowns, learning-phase, spend cap,
+  crash-free under injected API errors, no out-of-scope calls).

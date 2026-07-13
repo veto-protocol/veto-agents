@@ -1078,6 +1078,15 @@ def govern_and_execute(
     if not str(action.entity_id or "").strip():
         console.print("    [red]x action has no entity_id — refused.[/red]")
         return _outcome("skipped", reason="action has no entity_id")
+    # refresh_creative needs a Facebook Page (creative upload requires
+    # page_id). A user without META_PAGE_ID can still run the whole loop —
+    # budgets, pause/resume — we just refuse the one action needing a page.
+    if action.type == "refresh_creative" and not getattr(mc, "page_id", None):
+        console.print(
+            "    [yellow]holding: refresh_creative needs META_PAGE_ID "
+            "(a Facebook Page) — not configured; skipping.[/yellow]"
+        )
+        return _outcome("held", reason="refresh_creative unavailable: no META_PAGE_ID configured")
 
     # ── ad-ops DISCIPLINE gate (CODE-enforced patience, BEFORE Veto) ──────
     if adops is None:

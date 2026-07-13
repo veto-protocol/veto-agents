@@ -139,6 +139,11 @@ class SimRun:
     cycle_results: list[dict]
     exceptions: list[dict]
     authorize_calls: int
+    # Out-of-scope creation calls (create_campaign/adset/ad, upload_image,
+    # create_creative) that actually reached the sim client. Must stay EMPTY;
+    # surfaced here so I6 can assert it (the sim records them separately from the
+    # audit log, so if we drop them the invariant is vacuous — see check I6).
+    scope_violations: list[dict] = field(default_factory=list)
     wall_s: float = 0.0
 
 
@@ -223,6 +228,7 @@ def run_sim(
         cycle_results=cycle_results,
         exceptions=exceptions,
         authorize_calls=len(getattr(stub, "calls", []) or []),
+        scope_violations=list(getattr(sim, "scope_violations", []) or []),
         wall_s=wall_s,
     )
 
@@ -333,8 +339,15 @@ def check_invariants(run: SimRun) -> dict[str, tuple[str, str]]:
         for row in res.get("actions", []) or []:
             if row.get("type") not in ALLOWED_ACTIONS:
                 v6.append(f"out-of-scope action type {row.get('type')!r}")
-    # scope_violations live on the sim client — surfaced via cycle side effects;
-    # re-derive from the audit ops (creation ops never appear as legit ops).
+    # Out-of-scope CREATION calls (create_campaign/adset/ad, upload_image,
+    # create_creative) never appear in the audit log — the sim records them in a
+    # SEPARATE `scope_violations` list. We MUST assert that list is empty here, or
+    # a defense-in-depth breach (a creation call reaching the client) goes
+    # completely undetected and this invariant is vacuous.
+    for sv in run.scope_violations:
+        v6.append(
+            f"out-of-scope client call {sv.get('op')} day {sv.get('sim_day')}"
+        )
     out["I6"] = ("PASS", "only in-scope actions reached the client") if not v6 else ("FAIL", "; ".join(v6[:3]))
 
     # I7 — in all_tank, after the collapse (day ≥ 6) the agent never RAISED a budget.
