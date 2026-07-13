@@ -67,6 +67,14 @@ def run(
             "[cyan]veto-agents setup[/cyan].\n"
         )
 
+    # A brand profile (if set) makes the whole package brand-true — the director
+    # loads it internally, so this is purely a cosmetic heads-up. No signature
+    # change: brand flows through director_mod.direct().
+    from . import brand as brand_mod
+    _bp = brand_mod.load(cfg)
+    if _bp is not None:
+        console.print(f"  [dim]brand: {_bp.name} · tone: {_bp.tone or '—'}[/dim]")
+
     # ── 1. DIRECT ─────────────────────────────────────────────────────────
     console.print("  [cyan]›[/cyan] Directing… (deriving one coherent concept)")
     try:

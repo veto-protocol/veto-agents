@@ -574,13 +574,23 @@ def decide(state: dict, goal: str, cfg) -> tuple[list[Action], str]:
         f"(larger jumps will be clamped downstream anyway).\n"
         f"• You may PAUSE a clearly-bad or runaway ad set at any time — that is "
         f"the one action that does not need to wait for the learning/data bar.\n"
+        "• When proposing refresh_creative, the creative_prompt must fit the "
+        "BRAND line (tone, colors, and never the forbidden items) when a BRAND "
+        "line is present.\n"
         "A separate CODE layer enforces all of the above regardless of what you "
         "propose, so proposing patient, well-justified actions makes the loop "
         "smoother — reckless proposals will simply be held."
     )
 
+    # Light brand context (advisory) so refresh_creative rationales/prompts fit
+    # the brand. Governance + the code discipline layer stay authoritative.
+    from .creative import brand as brand_mod
+    _bp = brand_mod.load(cfg)
+    brand_line = f"BRAND: {brand_mod.brand_summary_line(_bp)}\n\n" if _bp else ""
+
     user_prompt = (
         f"GOAL: {goal}\n\n"
+        f"{brand_line}"
         f"OBSERVED STATE (last 7 days):\n{_state_for_prompt(state)}\n\n"
         "Decide what to do this cycle. Return zero or more in-scope actions."
     )

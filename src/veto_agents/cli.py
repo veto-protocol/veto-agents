@@ -104,6 +104,10 @@ app.add_typer(policy_app, name="policy")
 wallet_app = typer.Typer(help="Manage the embedded wallet.")
 app.add_typer(wallet_app, name="wallet")
 
+# Sub-app for `veto-agents brand ...`
+brand_app = typer.Typer(help="Brand profile the creative studio and ad buyer follow.")
+app.add_typer(brand_app, name="brand")
+
 
 console = Console()
 
@@ -1544,6 +1548,10 @@ def create(
       OPENAI_API_KEY, HIGGSFIELD_API_KEY + HIGGSFIELD_API_SECRET, ELEVENLABS_API_KEY.
     The director needs ANTHROPIC_API_KEY. Missing keys degrade gracefully.
 
+    BRAND: set a brand profile once with `veto-agents brand set <url-or-file>` and
+    every run follows it — concept, copy, and the image/video prompts match your
+    brand's tone, colors, aesthetic, and forbidden list.
+
     Examples:
       veto-agents create "premium cold-brew coffee for busy founders, launch week"
       veto-agents create "eco running shoe" --image-provider fal --no-video
@@ -1571,6 +1579,126 @@ def create(
         image_provider=image_provider,
         out_root=_Path(out) if out else None,
     )
+
+
+# ─── brand ──────────────────────────────────────────────────────────────
+
+
+def _render_brand_table(profile, path=None) -> None:
+    """Pretty, human-friendly view of a brand profile — never a wall of YAML."""
+    table = Table(show_header=False, box=None, pad_edge=False, padding=(0, 2))
+    table.add_column("k", style="dim", no_wrap=True)
+    table.add_column("v")
+
+    def _row(label, value):
+        if value:
+            table.add_row(label, value)
+
+    _row("Name", profile.name)
+    _row("Product", profile.product)
+    _row("One-liner", profile.one_liner)
+    _row("Audience", profile.audience)
+    _row("Tone", profile.tone)
+    _row("Value props", " · ".join(profile.value_props))
+    _row("Voice DO", ", ".join(profile.voice_dos))
+    _row("Voice DON'T", ", ".join(profile.voice_donts))
+    _row("Aesthetic", profile.aesthetic)
+    if profile.colors:
+        _row("Colors", "  ".join(f"{k}={v}" for k, v in profile.colors.items()))
+    if profile.forbidden:
+        table.add_row("Forbidden", f"[red]{', '.join(profile.forbidden)}[/red]")
+    src = profile.source or {}
+    if src.get("url") or src.get("file"):
+        _row("Source", src.get("url") or src.get("file"))
+    _row("Extracted", src.get("extracted_at"))
+    if path is not None:
+        _row("File", str(path))
+    console.print(table)
+
+
+@brand_app.command("set")
+def brand_set(
+    source: str = typer.Argument(
+        ..., help="Brand website URL, or a local .txt/.md brand dump."
+    ),
+    yes: bool = typer.Option(
+        False, "--yes", "-y", help="Save without the confirm prompt."
+    ),
+) -> None:
+    """Extract a brand profile (one LLM call) and save it to ~/.veto/brand.yaml.
+
+    Once set, `veto-agents create` and the ad-buyer follow it automatically:
+    concept, copy, and the image/video prompts match the brand's tone, colors,
+    aesthetic, and forbidden list. The saved file is plain, editable YAML.
+    """
+    from .agents.adbuyer.creative import brand as brand_mod  # lazy — house style
+
+    cfg = cfg_module.load()
+    is_url = source.strip().lower().startswith("http")
+    verb = "Reading" if is_url else "Reading file"
+    try:
+        with console.status(f"[cyan]{verb} {source}… extracting brand profile…[/cyan]"):
+            profile = brand_mod.extract(source, cfg)
+    except brand_mod.BrandError as e:
+        console.print(f"[red]✗[/red] {e}")
+        raise typer.Exit(1)
+
+    console.print("\n[bold]Here's what I learned:[/bold]")
+    _render_brand_table(profile)
+
+    if not yes and not Confirm.ask("\nSave this brand profile?", default=True):
+        console.print("[dim]Not saved.[/dim]")
+        raise typer.Exit(0)
+
+    path = brand_mod.save_brand(profile)
+    console.print(
+        f"[green]✓[/green] Brand saved → {path}  "
+        f"[dim](edit it anytime — it's plain YAML)[/dim]"
+    )
+    console.print(
+        "[dim]veto-agents create / adbuyer now follow this brand automatically.[/dim]"
+    )
+
+
+@brand_app.command("show")
+def brand_show() -> None:
+    """Show the active brand profile (or how to set one)."""
+    from .agents.adbuyer.creative import brand as brand_mod
+
+    cfg = cfg_module.load()
+    profile = brand_mod.load_brand(cfg)
+    if profile is None:
+        console.print(
+            "[dim]No brand profile.[/dim] Set one:  "
+            "[cyan]veto-agents brand set https://yourbrand.com[/cyan]"
+        )
+        raise typer.Exit(0)
+    console.print("[bold]Brand profile[/bold]")
+    _render_brand_table(profile, path=brand_mod.brand_path())
+
+
+@brand_app.command("clear")
+def brand_clear(
+    yes: bool = typer.Option(
+        False, "--yes", "-y", help="Delete without the confirm prompt."
+    ),
+) -> None:
+    """Remove the brand profile — creative runs go back to brand-free."""
+    from .agents.adbuyer.creative import brand as brand_mod
+
+    path = brand_mod.brand_path()
+    if not path.exists():
+        console.print("[dim]No brand profile to remove.[/dim]")
+        raise typer.Exit(0)
+    if not yes and not Confirm.ask(f"Delete {path}?", default=False):
+        console.print("[dim]Kept.[/dim]")
+        raise typer.Exit(0)
+    if brand_mod.clear():
+        console.print(
+            "[green]✓[/green] Brand profile removed — creative runs are brand-free again."
+        )
+    else:
+        console.print("[yellow]·[/yellow] Nothing was removed.")
 
 
 @app.command()

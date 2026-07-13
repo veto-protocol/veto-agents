@@ -70,3 +70,15 @@ dollar moves**, and a code-enforced ad-ops discipline gate bounds the downside.
   scenarios × seeds × 30 sim-days (900 cycles in ~3.5s), machine-checked
   governance invariants (±20% clamp, cooldowns, learning-phase, spend cap,
   crash-free under injected API errors, no out-of-scope calls).
+
+## [0.0.27] — 2026-07-13
+### Added
+- **Brand ingestion**: `veto-agents brand set <url-or-file>` — extract a brand
+  profile (product, audience, tone, voice rules, colors) from your website or
+  an agent-written txt/md dump into an editable `~/.veto/brand.yaml`; the
+  creative director and the decide brain use it automatically. Site text is
+  treated as untrusted (structured extraction only; no raw page text reaches
+  the director), binary/non-HTML rejected, secrets can't round-trip.
+### Notes
+- Live-verified end to end against real Meta (reads, PAUSED writes, full
+  dry-run autonomous cycle) and 900 simulated days of adversarial scenarios.

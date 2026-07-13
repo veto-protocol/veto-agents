@@ -30,6 +30,8 @@ from typing import Any
 # of how deep this package sits.
 from veto_agents.structured_llm import StructuredLLMError, structured_llm
 
+from . import brand as brand_mod
+
 
 class DirectorError(RuntimeError):
     """Raised when the director can't produce a concept (no key, LLM error)."""
@@ -121,6 +123,10 @@ _SYSTEM_PROMPT = (
     "coherent: the copy, the hero image, the hero video, and the voiceover must all "
     "clearly belong to the SAME concept. Be specific and concrete. Avoid generic "
     "ad-speak. Ground everything in the product and audience described in the brief. "
+    "If a BRAND PROFILE is provided, it is BINDING: concept and copy must match "
+    "the brand's tone, voice rules, and product truth; the image and video prompts "
+    "must explicitly incorporate the brand's colors and aesthetic; and you must "
+    "never violate the brand's forbidden list. "
     "You must return your answer through the provided tool."
 )
 
@@ -131,8 +137,13 @@ def direct(brief: str, cfg) -> Concept:
     Runs on whichever LLM provider/key the user has (via `structured_llm`).
     Raises DirectorError if no provider key is configured or the LLM call fails.
     """
+    # Brand is loaded here (not passed in) so studio.run()'s signature and call
+    # site stay untouched. None when there's no brand.yaml → zero behavior change.
+    profile = brand_mod.load(cfg)
+    brand_block = f"\n{brand_mod.brand_prompt_block(profile)}\n" if profile else ""
     user_prompt = (
         f"PRODUCT BRIEF:\n{brief.strip()}\n\n"
+        f"{brand_block}"
         "Produce the unified creative concept and all derived assets now."
     )
 

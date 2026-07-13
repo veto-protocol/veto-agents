@@ -75,15 +75,20 @@ curl -fsSL https://raw.githubusercontent.com/veto-protocol/veto-agents/main/inst
 #    Meta ad account → budget guardrails. Writes 0600 configs, never prints a secret.
 veto-agents adbuyer-setup
 
-# 3. Make an ad — no Meta account needed. One concept → copy + hero image (+ optional
+# 3. (Optional, recommended) Teach it your brand — drop your site URL (or a txt/md
+#    dump from another agent). It extracts product, audience, tone, voice rules and
+#    colors into an editable ~/.veto/brand.yaml; every ad it makes matches YOUR brand.
+veto-agents brand set https://yourdomain.com
+
+# 4. Make an ad — no Meta account needed. One concept → copy + hero image (+ optional
 #    video/voice), each paid asset Veto-gated. Drops into ~/Downloads/veto-studio/.
 veto-agents create "premium cold-brew coffee for busy founders, launch week"
 
-# 4. Run the autonomous loop with a mock Meta account (no account, no real spend —
+# 5. Run the autonomous loop with a mock Meta account (no account, no real spend —
 #    but real Veto + real discipline gate on every action).
 veto-agents adbuyer --goal "grow signups, US, up to $30/day" --mock
 
-# 5. Or drop it into Claude Code / Claude Desktop / OpenClaw as MCP tools.
+# 6. Or drop it into Claude Code / Claude Desktop / OpenClaw as MCP tools.
 claude mcp add veto-agents -- veto-agents mcp
 ```
 
@@ -137,6 +142,16 @@ never rejected, just made gradual. `pause` is exempt from the learning/data bar
 `~/.veto/adbuyer_state.json`, written only after an action executes.
 
 Config lives in `policy.yaml → ad_ops:`; edit via `veto-agents policy edit adbuyer`.
+
+### Proven under chaos — 900 simulated days, zero violations
+
+The repo ships a stochastic simulation harness (`tests/sim/`) that runs the
+agent through 6 adversarial scenarios × 5 seeds × 30 simulated days — creative
+fatigue, market collapse, pure noise, late bloomers, flaky APIs — **900 cycles
+in ~3.5 s**, with every governance invariant machine-checked: never past ±20%
+per step, never touched a learning ad set, never broke a cooldown, never
+exceeded the spend cap, never raised a budget after a collapse, zero unhandled
+exceptions. Run it yourself: `python -m tests.sim.harness --sweep`.
 
 ### Non-custodial — Veto governs decisions, never holds your money
 
