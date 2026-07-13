@@ -51,3 +51,11 @@ dollar moves**, and a code-enforced ad-ops discipline gate bounds the downside.
 ### Removed
 
 - `agents/media/tools/replicate_image.py` — superseded by the keyless x402 path.
+
+## [0.0.26] — 2026-07-13
+### Fixed
+- meta_ads: Meta now requires `is_adset_budget_sharing_enabled` on campaign
+  creation when the budget lives on the ad set (error 4834011). We send
+  `false` — budget sharing between ad sets would blur the agent's ±20%
+  per-adset clamp guarantees. Found by the first live write test against
+  the real Marketing API.

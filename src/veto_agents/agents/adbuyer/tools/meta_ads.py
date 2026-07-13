@@ -214,6 +214,11 @@ class MetaAdsClient:
             "objective": objective,
             "status": status,
             "special_ad_categories": _json_array(cats),
+            # Required by Meta (error code 4834011) when the budget lives on
+            # the ad set rather than the campaign (our model). False = ad sets
+            # do NOT share budget with each other — sharing would blur the
+            # agent's per-adset ±20% budget-clamp guarantees.
+            "is_adset_budget_sharing_enabled": "false",
         }
         resp = self._post(f"{self.account_id}/campaigns", data=data)
         return _require_id(resp, "campaign")

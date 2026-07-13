@@ -45,6 +45,7 @@ a misbehaving brain cannot spend. Veto governs; Meta executes.
 from __future__ import annotations
 
 import json
+import math
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -930,7 +931,17 @@ def _apply_magnitude_cap(
     pct = max(0.0, adops.max_budget_change_pct) / 100.0
     lo = old * (1.0 - pct)
     hi = old * (1.0 + pct)
-    clamped = round(min(hi, max(lo, proposed)), 2)
+    # Clamp to the band, then quantize to whole cents WITHOUT ever leaving it.
+    # Plain round() can push a value a hair past the cap — e.g. $85.98 * 1.20 =
+    # $103.176 rounds to $103.18, which is +20.005%, breaching the magnitude
+    # discipline. Floor the upper edge (and ceil the lower edge) so the WRITTEN
+    # budget is always within +/-pct of the current one — a spend cap must never
+    # round a change upward past its own limit.
+    lo_cents = math.ceil(lo * 100 - 1e-9)
+    hi_cents = math.floor(hi * 100 + 1e-9)
+    proposed_cents = round(min(hi, max(lo, proposed)) * 100)
+    clamped_cents = min(hi_cents, max(lo_cents, proposed_cents))
+    clamped = clamped_cents / 100.0
     if abs(clamped - proposed) > 0.005:
         console.print(
             f"    [yellow]capped to +/-{adops.max_budget_change_pct:g}%[/yellow] "
@@ -1652,6 +1663,11 @@ def run_cycle(
     mock: bool = False,
     no_llm: bool = False,
     dry_run: bool = False,
+    mc: "meta_ads.MetaAdsClient | None" = None,
+    veto_client: "VetoClient | None" = None,
+    action_state_path: Path | None = None,
+    reset_mock_world: bool = True,
+    now: datetime | None = None,
 ) -> dict[str, Any]:
     """Run ONE OBSERVE → DECIDE → DISCIPLINE → VETO → ACT cycle, structured.
 
@@ -1665,6 +1681,24 @@ def run_cycle(
     and the discipline gate still run on every action. `no_llm` forces the
     pure-rules heuristic brain (also implied when mocking with no LLM key).
     `dry_run` runs both gates but skips the Meta write.
+
+    Test-harness injection seam (all optional; production callers pass none of
+    these and behaviour is unchanged):
+      * `mc` — a pre-built Meta client to REUSE across cycles instead of building
+        one. When supplied the caller owns its lifecycle (it is NOT closed here)
+        and the mock-world/cooldown reset below is skipped, so an accelerated
+        simulation can drive many cycles against ONE persistent world.
+      * `veto_client` — a pre-built (or stub) Veto client. When supplied the
+        caller owns its lifecycle (it is NOT closed here). The offline sim uses a
+        local `allow` stub so the discipline gate is exercised under volume
+        without hammering prod; a live pass injects a real `VetoClient`.
+      * `action_state_path` — override the per-entity cooldown state file (a
+        per-run temp file keeps sim runs off the real `~/.veto` state).
+      * `reset_mock_world` — when False, do NOT reset the seeded mock world /
+        cooldown file (the sim resets once and then persists across sim-days).
+      * `now` — the reference clock for the discipline gate (entity age + the
+        per-entity cooldown). The sim passes a SIMULATED clock (one day per
+        cycle) so cooldown/age are measured in sim-days, not wall-clock.
 
     Returns:
       {goal, mock, dry_run, brain, summary,
@@ -1698,12 +1732,16 @@ def run_cycle(
 
     # Brain selection — identical rule to run_loop.
     use_heuristic = no_llm or (mock and not has_llm_key(cfg))
-    action_state_path = _mock_state_path() if mock else None
+    # Cooldown state file: an injected path (sim → per-run temp) wins; else the
+    # mock file for mock runs, or the real file otherwise.
+    if action_state_path is None:
+        action_state_path = _mock_state_path() if mock else None
 
-    if mock:
-        # Fresh mimicked world + matching cooldown file each mock invocation, so
-        # the demo is reproducible (cooldown still applies across cycles ONLY
-        # within a run — irrelevant here since run_cycle is a single cycle).
+    # Reset the mimicked world + its cooldown file ONCE per invocation so a
+    # standalone mock cycle is reproducible — but ONLY when we own the Meta
+    # client. An injected `mc` (the accelerated sim) carries a persistent world
+    # across many sim-days and manages its own reset, so we must not wipe it.
+    if mock and mc is None and reset_mock_world:
         from .tools import mock_meta as _mock
 
         _mock.reset_world()
@@ -1713,12 +1751,18 @@ def run_cycle(
         except Exception:  # noqa: BLE001 — best-effort demo reset
             pass
 
-    client = VetoClient(api_base=cfg.veto_api_base, api_key=cfg.api_key)
-    try:
-        mc = make_meta_client(meta, mock=mock)
-    except Exception as e:  # noqa: BLE001 — surface as data, never raise
-        client.close()
-        return {"error": "meta_client_error", "detail": str(e)}
+    # Veto client + Meta client: reuse an injected instance (caller owns its
+    # lifecycle) or build+own one here.
+    owns_client = veto_client is None
+    client = veto_client or VetoClient(api_base=cfg.veto_api_base, api_key=cfg.api_key)
+    owns_mc = mc is None
+    if mc is None:
+        try:
+            mc = make_meta_client(meta, mock=mock)
+        except Exception as e:  # noqa: BLE001 — surface as data, never raise
+            if owns_client:
+                client.close()
+            return {"error": "meta_client_error", "detail": str(e)}
 
     rows: list[dict] = []
     tally: dict[str, int] = {}
@@ -1734,7 +1778,10 @@ def run_cycle(
 
         adops = load_ad_ops()
         action_state = load_action_state(action_state_path)
-        now = datetime.now(timezone.utc)
+        # `now` is the discipline-gate reference clock; the sim injects a
+        # simulated one (one day per cycle) so age/cooldown are in sim-days.
+        if now is None:
+            now = datetime.now(timezone.utc)
         for action in actions:
             oc = govern_and_execute(
                 action, client, mc, cfg, console,
@@ -1758,11 +1805,15 @@ def run_cycle(
                 "new_budget_usd": oc.new_budget_usd,
             })
     finally:
-        client.close()
-        try:
-            mc.close()
-        except Exception:  # noqa: BLE001 — cleanup must never mask the result
-            pass
+        # Only close what we own; an injected sim client / Veto client is
+        # reused across many cycles and closed by the caller.
+        if owns_client:
+            client.close()
+        if owns_mc:
+            try:
+                mc.close()
+            except Exception:  # noqa: BLE001 — cleanup must never mask the result
+                pass
 
     return {
         "goal": goal,
