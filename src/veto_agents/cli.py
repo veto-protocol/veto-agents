@@ -75,7 +75,7 @@ def _try_it_command(cfg) -> str:
     is installed yet."""
     examples = {
         "media":    'veto-agents media "an instagram carousel for a coffee shop launch — 3 frames"',
-        "adbuyer":  'veto-agents adbuyer "US traffic campaign to https://mysite.com, $20/day"',
+        "adbuyer":  "veto-agents adbuyer 'US traffic campaign to https://mysite.com, $20/day'",
         "groups":   'veto-agents groups "draft a welcome message for new Telegram members"',
         "research": 'veto-agents research "find the top 5 x402-adjacent open-source repos this month"',
         "inbox":    'veto-agents inbox "summarize my last 24 hours of email"',
@@ -280,7 +280,7 @@ def _render_status(cfg) -> None:
     # ── Zero-setup try ────────────────────────────────────────────────────
     console.print()
     console.print("[bold]Try it now (no ad account, no spend — real governance):[/bold]")
-    console.print('  [cyan]veto-agents adbuyer -g "grow signups, US, up to $30/day" --mock --once[/cyan]')
+    console.print("  [cyan]veto-agents adbuyer -g 'grow signups, US, up to $30/day' --mock --once[/cyan]")
     console.print(
         f"\n[dim]All commands + flags: [cyan]veto-agents --help[/cyan]  ·  docs: github.com/veto-protocol/veto-agents  ·  v{__version__}[/dim]\n"
     )
@@ -1155,7 +1155,7 @@ def _adbuyer_summary(console: Console) -> None:
         "   [dim]creative only — no Meta needed[/dim]"
     )
     console.print(
-        '  [cyan]veto-agents adbuyer --goal "US traffic to https://mysite.com, keep CPC under $1" --once --mock[/cyan]'
+        "  [cyan]veto-agents adbuyer --goal 'US traffic to https://mysite.com, keep CPC under $1' --once --mock[/cyan]"
         "   [dim]full loop, no real spend[/dim]"
     )
     console.print(
@@ -1815,9 +1815,9 @@ def adbuyer(
     agent's OWN decisions, not a per-command consent gate.
 
     Examples:
-      veto-agents adbuyer --goal "US traffic to https://mysite.com, keep CPC under $1"
-      veto-agents adbuyer -g "grow signups, cap $150/day" --once --dry-run
-      veto-agents adbuyer -g "grow signups, US, up to $30/day" --mock --once
+      veto-agents adbuyer --goal 'US traffic to https://mysite.com, keep CPC under $1'
+      veto-agents adbuyer -g 'grow signups, cap $150/day' --once --dry-run
+      veto-agents adbuyer -g 'grow signups, US, up to $30/day' --mock --once
     """
     cfg = cfg_module.load()
     # --mock mimics Meta with no account, no spend — the whole "no account, no

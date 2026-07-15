@@ -13,7 +13,7 @@ Runs your Meta ads 24/7 on a standing goal — scaling winners, killing losers �
 Reproduce the demo with zero setup — no Meta account, no real spend, real Veto:
 
 ```bash
-veto-agents adbuyer -g "grow signups, US, up to $30/day" --mock --once --no-llm
+veto-agents adbuyer -g 'grow signups, US, up to $30/day' --mock --once --no-llm
 ```
 
 **→ Read the full README: [src/veto_agents/agents/adbuyer/README.md](src/veto_agents/agents/adbuyer/README.md)** · MCP wiring: [docs/MCP.md](docs/MCP.md)
@@ -31,7 +31,7 @@ Then:
 ```bash
 veto-agents                                             # first-time setup (sign in, optional wallet + funding)
 veto-agents adbuyer-setup                               # guided setup for the flagship media buyer
-veto-agents adbuyer -g "grow signups, US, up to $30/day" --mock   # run it — no Meta account, no real spend
+veto-agents adbuyer -g 'grow signups, US, up to $30/day' --mock   # run it — no Meta account, no real spend
 ```
 
 Veto authorizes every spend before a dollar moves; you get a signed receipt at `veto-ai.com/r/<uuid>`. That's the loop. Prefer a one-off creative or image instead? `veto-agents create "…"` (keyless over x402 — no provider accounts).

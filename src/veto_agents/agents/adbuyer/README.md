@@ -58,7 +58,7 @@ scaled +20% and the loser got paused, both cleared with `Veto: allowed ✓`.
 Reproduce it right now, no Meta account:
 
 ```bash
-veto-agents adbuyer -g "grow signups, US, up to $30/day" --mock --once --no-llm
+veto-agents adbuyer -g 'grow signups, US, up to $30/day' --mock --once --no-llm
 ```
 
 ---
@@ -86,7 +86,7 @@ veto-agents create "premium cold-brew coffee for busy founders, launch week"
 
 # 5. Run the autonomous loop with a mock Meta account (no account, no real spend —
 #    but real Veto + real discipline gate on every action).
-veto-agents adbuyer --goal "grow signups, US, up to $30/day" --mock
+veto-agents adbuyer --goal 'grow signups, US, up to $30/day' --mock
 
 # 6. Or drop it into Claude Code / Claude Desktop / OpenClaw as MCP tools.
 claude mcp add veto-agents -- veto-agents mcp
@@ -96,7 +96,7 @@ When you're ready for real spend, `adbuyer-setup` wires your **own** Meta ad
 account (BYO token) and you drop `--mock`:
 
 ```bash
-veto-agents adbuyer --goal "US traffic to https://mysite.com, keep CPC under $1"
+veto-agents adbuyer --goal 'US traffic to https://mysite.com, keep CPC under $1'
 ```
 
 Scriptable, non-interactive setup:

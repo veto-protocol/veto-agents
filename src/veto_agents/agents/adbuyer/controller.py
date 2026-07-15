@@ -1087,6 +1087,41 @@ class ActionOutcome:
     new_budget_usd: float | None = None  # post-clamp
 
 
+_ACTION_STYLE = {
+    "adjust_budget_up":   ("green",  "▲ Scaling up"),
+    "adjust_budget_down": ("yellow", "▼ Trimming"),
+    "pause":              ("red",    "⏸ Pausing"),
+    "resume":             ("green",  "▶ Resuming"),
+    "refresh_creative":   ("cyan",   "✎ New creative for"),
+}
+
+
+def _entity_name(state, entity_id: str) -> str:
+    """Friendly name for an observed entity id (falls back to the id itself)."""
+    if isinstance(state, dict):
+        for key in ("adsets", "ads", "campaigns"):
+            for e in state.get(key, []):
+                if str(e.get("id")) == str(entity_id):
+                    return str(e.get("name") or entity_id)
+    return str(entity_id)
+
+
+def _action_headline(action: "Action", state) -> str:
+    """A plain-English, colour-coded one-liner for what the agent will do — using
+    the ad set's NAME (not its raw id), so a human instantly gets the decision."""
+    name = _entity_name(state, action.entity_id)
+    if action.type == "adjust_budget":
+        old = action.old_budget_usd or 0
+        new = action.new_budget_usd or 0
+        key = "adjust_budget_up" if new >= old else "adjust_budget_down"
+        color, verb = _ACTION_STYLE[key]
+        pct = ((new - old) / old * 100) if old else 0
+        return (f'[{color}]{verb}[/{color}] [bold]"{name}"[/bold] '
+                f'[dim]— ${old:,.0f} → ${new:,.0f}/day ({pct:+.0f}%)[/dim]')
+    color, verb = _ACTION_STYLE.get(action.type, ("cyan", action.type.replace("_", " ")))
+    return f'[{color}]{verb}[/{color}] [bold]"{name}"[/bold]'
+
+
 def _show_verdict(res, console: Console, *, label: str) -> None:
     """Print the Veto verdict + receipt URL. Governance is shown on the GOOD path
     too: an ALLOW carries its signed receipt just like a deny/escalate does — a
@@ -1106,7 +1141,7 @@ def _show_verdict(res, console: Console, *, label: str) -> None:
                 "[dim](local — sign in for signed Veto receipts)[/dim]"
             )
         else:
-            console.print("    [green]Veto: allowed ✓[/green] [dim](no receipt returned)[/dim]")
+            console.print("    [green]Veto: allowed ✓[/green]")
     else:
         if res.receipt_url:
             console.print(f"    [dim]receipt: {res.receipt_url}[/dim]")
@@ -1159,8 +1194,8 @@ def govern_and_execute(
     The per-entity cooldown is stamped in `action_state` (and persisted) ONLY
     after an action is allowed AND executed — never on HOLD/deny/dry-run.
     """
-    console.print(f"  [bold cyan]->[/bold cyan] {action.describe()}")
-    console.print(f"    [dim]rationale:[/dim] {action.rationale}")
+    console.print(f"  {_action_headline(action, state)}")
+    console.print(f"    [dim]why: {action.rationale}[/dim]")
 
     label = action.type
 
@@ -1593,12 +1628,24 @@ def _run_cycle(
             tally[outcome.outcome] = tally.get(outcome.outcome, 0) + 1
 
         # RECORD
-        summary_bits = ", ".join(f"{k}={v}" for k, v in sorted(tally.items()))
-        console.print(f"  [bold]cycle {n} summary:[/bold] {summary_bits}")
-        if tally.get("held") and set(tally) == {"held"}:
+        friendly = {
+            "executed": "applied", "dry-run": "previewed (not applied)",
+            "held": "held back for discipline", "denied": "blocked by Veto",
+            "escalated": "escalated to you", "skipped": "skipped", "failed": "failed",
+        }
+        parts = [f"{v} {friendly.get(k, k)}" for k, v in sorted(tally.items())]
+        console.print(f"\n  [bold]Cycle {n} recap:[/bold] " + ", ".join(parts) + ".")
+        if tally.get("executed"):
             console.print(
-                "  [dim]all proposed actions held for discipline — patience is "
-                "the default, valid outcome.[/dim]"
+                "  [dim]↳ every change above was approved by Veto BEFORE it touched "
+                "the account. On a real account, anything breaking your budget rules is "
+                "blocked right here — that's the whole point.[/dim]"
+            )
+        elif set(tally) == {"held"}:
+            console.print(
+                "  [dim]↳ nothing changed — the agent held back on purpose (too "
+                "early to judge, or inside a cooldown). Patience is the default, and it's "
+                "the correct call.[/dim]"
             )
     finally:
         if owns_mc:
@@ -1613,19 +1660,20 @@ def _render_observed_adsets(state: dict, console: Console) -> None:
     reader of the mock demo) can scan: budget, learning phase, CTR, spend."""
     for a in state.get("adsets", []):
         row = _insights_row_for(state, str(a.get("id")))
-        learn = _learning_status(a) or "—"
+        learn = str(_learning_status(a) or "").upper()
         budget = a.get("daily_budget_usd")
-        budget_s = f"${budget:,.2f}/day" if budget is not None else "—"
+        budget_s = f"${budget:,.0f}/day" if budget is not None else "no budget"
+        tag = " [yellow](still learning)[/yellow]" if learn == "LEARNING" else ""
         if isinstance(row, dict):
-            perf = (
-                f"CTR {row.get('ctr', '0')}% · ${row.get('spend', '0')} spent · "
-                f"{row.get('impressions', '0')} impr"
-            )
+            ctr = float(row.get("ctr", 0) or 0)
+            spend = float(row.get("spend", 0) or 0)
+            impr = int(float(row.get("impressions", 0) or 0))
+            perf = f"{ctr:.2f}% CTR · ${spend:,.0f} spent · {impr:,} views"
         else:
-            perf = "no delivery"
+            perf = "no delivery yet"
         console.print(
-            f"    [dim]· {a.get('name')}[/dim] "
-            f"[{a.get('status')}/{learn}] {budget_s} — {perf}"
+            f'    [dim]•[/dim] [bold]"{a.get("name")}"[/bold]{tag}  '
+            f'[dim]— {budget_s} · {perf}[/dim]'
         )
 
 
@@ -1711,10 +1759,9 @@ def run_loop(
             )
     console.print(f"  [dim]goal:[/dim]      {goal}")
     console.print(
-        f"  [dim]agent_id:[/dim]  "
-        f"{cfg.agent_id or '(not signed in — local demo)'}"
+        "  [dim]I'll check each ad set, then scale winners / pause money-wasters / "
+        "leave still-learning ones alone — asking Veto before every change.[/dim]"
     )
-    console.print(f"  [dim]account:[/dim]   {meta.get('ad_account_id')}")
     console.print(
         f"  [dim]brain:[/dim]     {'heuristic (pure rules, no LLM)' if use_heuristic else 'LLM decide()'}"
     )
