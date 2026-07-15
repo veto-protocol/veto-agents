@@ -97,16 +97,27 @@ def generate(
 
     # ── Allowed → submit + poll ───────────────────────────────────────────
     headers = {"Authorization": f"Key {key_id}:{key_secret}", "Content-Type": "application/json"}
-    body: dict = {"model": model, "prompt": prompt, "duration": duration}
+    # VERIFIED against the live Cloud API (Jul 2026): DoP is IMAGE-to-video ONLY
+    # — there is no /v1/text2video/dop (it 404s "Model not found"). The real body
+    # nests everything under a `params` object, and input_images are typed objects
+    # ({"type":"image_url","image_url": ...}). A well-formed request reaches billing
+    # (403 "Not enough credits" without a funded Cloud API plan).
+    if not image_url:
+        return ToolResult(
+            ok=False, actual_cost_usd=0.0, provider="higgsfield", skipped=True,
+            error="Higgsfield DoP animates an input image — no image_url given. "
+                  "Generate an image first and pass its public URL (image_url=...).",
+        )
+    path = "/v1/image2video/dop"
+    params: dict = {
+        "model": model,
+        "prompt": prompt,
+        "duration": 10 if int(duration) >= 10 else 5,  # API accepts 5 or 10
+        "input_images": [{"type": "image_url", "image_url": image_url}],
+    }
     if seed is not None:
-        body["seed"] = seed
-    if image_url:
-        path = "/v1/image2video/dop"
-        body["input_images"] = [{"type": "image_url", "image_url": image_url}]
-    else:
-        path = "/v1/text2video/dop"
-        body["aspect_ratio"] = aspect_ratio
-        body["resolution"] = resolution
+        params["seed"] = seed
+    body: dict = {"params": params}
 
     try:
         with httpx.Client(timeout=60.0) as c:
@@ -154,24 +165,23 @@ def generate(
 def _resolve_video(
     submit: dict, headers: dict, timeout_s: float, interval_s: float
 ) -> tuple[str | None, str | None]:
-    """Return (video_url, error). Handles both a sync-complete submit and the
-    async request_id → poll path."""
-    # Already completed in the submit response?
-    url = _video_url(submit)
-    status = str(submit.get("status", "")).lower()
-    if url and status in ("", "completed"):
-        return url, None
-    if status in ("failed", "nsfw", "cancelled"):
-        return None, f"Higgsfield job {status}."
-
-    request_id = submit.get("request_id") or submit.get("id")
-    if not request_id:
-        if url:
-            return url, None
-        return None, "No request_id or video URL in Higgsfield submit response."
+    """Return (video_url, error). VERIFIED live (Jul 2026): submit returns a
+    job-set `{id, jobs:[{status, results}]}`; poll `GET /v1/job-sets/{id}` until
+    the job is terminal; the video URL lands at `jobs[0].results.raw.url`."""
+    jobset_id = submit.get("id") or submit.get("request_id")
+    job = _job_from_set(submit)
+    st = str(job.get("status", "")).lower()
+    if st == "completed":
+        u = _video_url(job)
+        if u:
+            return u, None
+    if st in ("failed", "nsfw", "cancelled"):
+        return None, f"Higgsfield job {st}."
+    if not jobset_id:
+        return None, "No job-set id in Higgsfield submit response."
 
     deadline = time.time() + timeout_s
-    poll_url = f"{HOST}/v1/requests/{request_id}/status"
+    poll_url = f"{HOST}/v1/job-sets/{jobset_id}"
     while time.time() < deadline:
         time.sleep(interval_s)
         try:
@@ -181,9 +191,10 @@ def _resolve_video(
                 data = pr.json() if isinstance(pr.json(), dict) else {}
         except httpx.HTTPError as e:
             return None, f"Higgsfield poll failed: {e}"
-        st = str(data.get("status", "")).lower()
+        job = _job_from_set(data)
+        st = str(job.get("status", "")).lower()
         if st == "completed":
-            u = _video_url(data)
+            u = _video_url(job)
             return (u, None) if u else (None, "Higgsfield completed but no video URL.")
         if st in ("failed", "nsfw", "cancelled"):
             return None, f"Higgsfield job {st}."
@@ -191,12 +202,29 @@ def _resolve_video(
     return None, f"Higgsfield job timed out after {timeout_s:.0f}s."
 
 
-def _video_url(data: dict) -> str | None:
-    if not isinstance(data, dict):
+def _job_from_set(js: dict) -> dict:
+    """First job of a job-set response (both submit + poll share this shape)."""
+    jobs = js.get("jobs") if isinstance(js, dict) else None
+    if isinstance(jobs, list) and jobs and isinstance(jobs[0], dict):
+        return jobs[0]
+    return js if isinstance(js, dict) else {}
+
+
+def _video_url(job: dict) -> str | None:
+    """Pull the mp4 URL from a completed job's `results` (prefer raw, then min)."""
+    if not isinstance(job, dict):
         return None
-    vid = data.get("video")
+    res = job.get("results")
+    if isinstance(res, dict):
+        for key in ("raw", "min"):
+            v = res.get(key)
+            if isinstance(v, dict) and v.get("url"):
+                return v["url"]
+        if res.get("url"):
+            return res["url"]
+    vid = job.get("video")  # legacy shapes
     if isinstance(vid, dict) and vid.get("url"):
         return vid["url"]
     if isinstance(vid, str):
         return vid
-    return data.get("video_url") or data.get("url")
+    return job.get("video_url") or job.get("url")
