@@ -384,17 +384,31 @@ def _thin(text: str) -> bool:
 
 
 def _read_file(path: str) -> str:
-    """Read a local .txt/.md brand dump verbatim (agent-dump friendly)."""
+    """Read a local .txt/.md brand dump verbatim (agent-dump friendly).
+
+    Only files with an EXPLICIT text extension (.txt/.md/.markdown) are read.
+    The empty suffix is deliberately NOT allowed: a no-extension path like
+    `~/.aws/credentials`, `~/.ssh/config`, or `~/.env` would otherwise be read
+    verbatim and shipped to a third-party extraction LLM — an exfil surface.
+    Requiring a real .txt/.md extension keeps this to files a user meant as a
+    brand dump.
+    """
+    # An empty or bare-directory ('.') path is a usage slip, not a missing file —
+    # give a clear pointer instead of the awkward "no such file: .".
+    if not (path or "").strip() or (path or "").strip() in (".", "./"):
+        raise BrandError(
+            "provide a URL or a .txt/.md file describing the brand."
+        )
     p = Path(path).expanduser()
     if not p.exists() or not p.is_file():
         raise BrandError(
             f"no such file: {path}. Pass a brand website URL, or a local "
             f".txt/.md file describing the brand."
         )
-    if p.suffix.lower() not in (".txt", ".md", ".markdown", ""):
+    if p.suffix.lower() not in (".txt", ".md", ".markdown"):
         raise BrandError(
-            f"unsupported file type '{p.suffix}'. Use a .txt or .md brand dump "
-            f"(or a brand website URL)."
+            f"unsupported file type '{p.suffix or '(none)'}'. Use a .txt or .md "
+            f"brand dump (or a brand website URL)."
         )
     try:
         text = p.read_text(errors="replace")

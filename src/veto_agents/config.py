@@ -114,11 +114,41 @@ class Config:
 _SECRET_FIELDS = ("api_key", "agent_id", "client_id", "email")
 
 
+def _read_config_yaml(p: Path) -> dict:
+    """Parse the config.yaml at `p`, fail-soft.
+
+    A missing file → {} (fresh install, normal). A malformed/truncated/
+    unreadable file (Ctrl-C mid-setup, disk full, bad edit) → {} plus a
+    one-line recovery hint on stderr — NEVER a raw ParserError/ScannerError
+    traceback that would brick every command on the bare launcher. This
+    mirrors load_brand()'s fail-soft posture. A VALID config is never lost:
+    only the parse is guarded, and only a genuinely broken file degrades to
+    safe defaults.
+    """
+    if not p.exists():
+        return {}
+    try:
+        data = yaml.safe_load(p.read_text())
+    except (OSError, yaml.YAMLError):
+        import sys
+
+        print(
+            f"veto-agents: config unreadable at {p} — fix it or run "
+            f"`veto-agents setup` (or delete the file to reset). "
+            f"Continuing with defaults.",
+            file=sys.stderr,
+        )
+        return {}
+    if not isinstance(data, dict):
+        # Valid YAML but not a mapping (e.g. a bare string/list). Treat as
+        # empty rather than crashing on `raw.get(...)` / `Config(**...)`.
+        return {}
+    return data
+
+
 def load() -> Config:
     p = config_path()
-    raw: dict = {}
-    if p.exists():
-        raw = yaml.safe_load(p.read_text()) or {}
+    raw: dict = _read_config_yaml(p)
 
     # One-shot migration: if a legacy plaintext yaml has api_key (pre-keychain
     # behaviour), move it to the keychain and strip from the yaml. After this

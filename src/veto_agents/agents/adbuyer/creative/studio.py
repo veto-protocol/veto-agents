@@ -36,6 +36,12 @@ from .types import ToolResult
 
 ALL_ASSETS = ("copy", "image", "video", "voice")
 
+# The canonical image providers. "openai" is a PAID BYO-key call ($0.25/image);
+# "fal" is the free x402 fallback. Anything else — a typo, empty string,
+# whitespace — must NEVER silently reach the paid provider (see _norm_image_provider).
+IMAGE_PROVIDERS = ("openai", "fal")
+DEFAULT_IMAGE_PROVIDER = "fal"  # money-safe default when the value is unknown/empty
+
 
 def run(
     brief: str,
@@ -108,8 +114,12 @@ def run(
 
     # ── 3. IMAGE ──────────────────────────────────────────────────────────
     if "image" in want and concept.image_prompt:
-        assets.append(_guarded(console, "image", image_provider,
-                               lambda: _do_image(concept, cfg, console, out_dir, image_provider)))
+        # Normalize/validate ONCE here (H-1): a typo/empty/whitespace value must
+        # never reach paid OpenAI — it resolves to the free fal fallback with a
+        # clear note. The clean value labels the manifest and feeds _do_image.
+        img_provider = _norm_image_provider(image_provider, console)
+        assets.append(_guarded(console, "image", img_provider,
+                               lambda: _do_image(concept, cfg, console, out_dir, img_provider)))
 
     # ── 4. VIDEO (optional) ───────────────────────────────────────────────
     if "video" in want and concept.video_prompt:
@@ -152,8 +162,35 @@ def _guarded(console: Console, kind: str, provider: str, fn) -> dict:
         ))
 
 
+def _norm_image_provider(provider: str | None, console: Console) -> str:
+    """Normalize + validate the image provider against IMAGE_PROVIDERS.
+
+    Money-safety (H-1): the ONLY value that may reach PAID OpenAI is an exact,
+    trimmed, lowercased "openai". A typo / empty / whitespace value must never
+    silently trigger the $0.25 paid call — it falls back to the FREE fal path
+    with a clear note. Trims + lowercases so "FAL ", "OpenAI\n", etc. resolve.
+    """
+    # Coerce defensively: a non-str provider (None, int, bytes, …) must resolve
+    # to the free fallback, never crash into a raw traceback on the way to a
+    # spend decision.
+    try:
+        norm = (provider or "").strip().lower() if isinstance(provider, str) else ""
+    except Exception:  # noqa: BLE001 — normalization must never raise
+        norm = ""
+    if norm in IMAGE_PROVIDERS:
+        return norm
+    # Unknown / empty / whitespace → do NOT call paid openai. Fall back to free fal.
+    shown = (provider if provider not in (None, "") else "<empty>")
+    console.print(
+        f"  [yellow]·[/yellow] Unknown image provider [bold]{shown!r}[/bold] "
+        f"(expected one of {', '.join(IMAGE_PROVIDERS)}) — "
+        f"using the free [bold]{DEFAULT_IMAGE_PROVIDER}[/bold] provider to avoid an unintended paid charge."
+    )
+    return DEFAULT_IMAGE_PROVIDER
+
+
 def _do_image(concept: Concept, cfg, console: Console, out_dir: Path, provider: str) -> dict:
-    provider = (provider or "openai").lower()
+    provider = _norm_image_provider(provider, console)
     # OpenAI needs a key; fall back to the free fal tool if absent.
     if provider == "openai" and not creative_creds.describe(cfg)["openai_image"]:
         console.print("  [yellow]·[/yellow] No OPENAI_API_KEY — falling back to free fal.ai image (x402).")
@@ -201,16 +238,41 @@ def _do_voice(concept: Concept, cfg, console: Console, out_dir: Path) -> dict:
 # ─── rendering / assembly helpers ─────────────────────────────────────────
 
 
+def _clean_receipt(raw: str | None) -> str | None:
+    """Normalize a provider's receipt value into a clean receipt URL, or None.
+
+    A real Veto receipt on the ALLOW path is a URL like
+    ``https://veto-ai.com/r/<uuid>`` (M-1: capture + store it, not just on deny).
+    But providers hand back one of several shapes:
+      • a proper URL   → keep it (this is what the table/manifest should show)
+      • an empty string / whitespace → no receipt → None (renders a clean "-",
+        instead of a misleading empty value that reads as "null on allow")
+      • a raw JWS/JWT compact receipt (2KB, "eyJ…") → NOT a URL; never dump that
+        into the table/manifest — collapse it to None (the signed JWT lives in
+        the verify tooling, not the chat/summary).
+    """
+    if not raw:
+        return None
+    s = str(raw).strip()
+    if not s:
+        return None
+    if s.startswith("http://") or s.startswith("https://"):
+        return s
+    # Not a URL (e.g. a raw compact JWT) — don't leak it into the summary.
+    return None
+
+
 def _echo_asset(console: Console, kind: str, res: ToolResult) -> None:
+    receipt = _clean_receipt(res.receipt_url)
     if res.ok:
         console.print(f"  [green]✓[/green] {kind}  [dim]${res.actual_cost_usd:.3f} → "
                       f"{Path(res.output_path).name if res.output_path else '?'}[/dim]")
-        if res.receipt_url:
-            console.print(f"    [dim]receipt: {res.receipt_url}[/dim]")
+        if receipt:
+            console.print(f"    [dim]receipt: {receipt}[/dim]")
     elif res.denied:
         console.print(f"  [red]✗[/red] {kind}  [yellow]Veto {res.verdict}[/yellow] — {res.error}")
-        if res.receipt_url:
-            console.print(f"    [dim]receipt: {res.receipt_url}[/dim]")
+        if receipt:
+            console.print(f"    [dim]receipt: {receipt}[/dim]")
     elif res.skipped:
         console.print(f"  [yellow]·[/yellow] {kind} skipped — {res.error}")
     else:
@@ -232,7 +294,9 @@ def _record(kind: str, provider: str, res: ToolResult) -> dict:
         "url": res.output_url,
         "cost_usd": round(res.actual_cost_usd, 4),
         "verdict": res.verdict,
-        "receipt_url": res.receipt_url,
+        # M-1: capture the real receipt URL on EVERY resolved verdict (allow too),
+        # not just deny. Cleaned so an empty/JWT value never masquerades as a URL.
+        "receipt_url": _clean_receipt(res.receipt_url),
         "error": res.error,
     }
 

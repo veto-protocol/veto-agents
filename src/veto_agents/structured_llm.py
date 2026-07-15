@@ -34,6 +34,7 @@ Both use forced tool-calling (not strict JSON schema) so the existing, un-touche
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 # The single source of truth for provider → env_var / endpoint / default_model.
@@ -183,6 +184,37 @@ def _validate(data: Any, schema: dict, tools_name: str) -> dict:
     return data
 
 
+# Redact anything that looks like an API key / bearer token from an SDK error
+# string. OpenAI's own 401 body echoes a masked prefix of the *submitted* key
+# ("sk-bogus****-key"); Anthropic uses "sk-ant-…". Never let any such fragment
+# reach a user-facing message, even masked.
+_KEY_TOKEN_RE = re.compile(
+    r"(sk-[A-Za-z0-9_\-*]+|Bearer\s+[A-Za-z0-9._\-*]+)", re.IGNORECASE
+)
+
+
+def _concise_api_error(provider_label: str, exc: Exception) -> str:
+    """Turn a raw SDK exception into a single-line reason — no traceback, no key.
+
+    A present-but-unusable key (invalid/expired/rate-limited/out-of-credits)
+    raises the SDK's APIStatusError subclasses (401 AuthenticationError,
+    400 BadRequestError 'credit balance too low', 429 RateLimitError, …). We
+    surface a short `status + message` string; the full SDK detail is preserved
+    only via exception chaining. Any key-like token is redacted defensively.
+    """
+    status = getattr(exc, "status_code", None)
+    # SDK APIStatusError exposes a parsed `.body`/`.message`; fall back to str().
+    detail = getattr(exc, "message", None) or str(exc) or exc.__class__.__name__
+    detail = " ".join(str(detail).split())          # collapse to one line
+    detail = _KEY_TOKEN_RE.sub("[redacted]", detail)  # strip any key fragment
+    if len(detail) > 200:
+        detail = detail[:197] + "…"
+    prefix = f"{provider_label} call failed"
+    if status is not None:
+        return f"{prefix}: {status} {detail}"
+    return f"{prefix}: {detail}"
+
+
 def _anthropic_call(route: _Route, system: str, user: str, schema: dict,
                     tools_name: str, max_tokens: int) -> dict:
     try:
@@ -194,18 +226,27 @@ def _anthropic_call(route: _Route, system: str, user: str, schema: dict,
         ) from e
 
     client = anthropic.Anthropic(api_key=route.api_key)
-    resp = client.messages.create(
-        model=route.model,
-        max_tokens=max_tokens,
-        system=system,
-        tools=[{
-            "name": tools_name,
-            "description": "Return the structured result.",
-            "input_schema": schema,
-        }],
-        tool_choice={"type": "tool", "name": tools_name},
-        messages=[{"role": "user", "content": user}],
-    )
+    try:
+        resp = client.messages.create(
+            model=route.model,
+            max_tokens=max_tokens,
+            system=system,
+            tools=[{
+                "name": tools_name,
+                "description": "Return the structured result.",
+                "input_schema": schema,
+            }],
+            tool_choice={"type": "tool", "name": tools_name},
+            messages=[{"role": "user", "content": user}],
+        )
+    except StructuredLLMError:
+        raise
+    except anthropic.AnthropicError as e:
+        # Present-but-unusable key / API failure (401, 400 credit-balance,
+        # 429, connection). Re-raise as a clean one-liner — no raw traceback.
+        raise StructuredLLMError(_concise_api_error("Anthropic", e)) from e
+    except Exception as e:  # noqa: BLE001 — any other SDK/client error, fail clean
+        raise StructuredLLMError(_concise_api_error("Anthropic", e)) from e
     for block in resp.content:
         if getattr(block, "type", None) == "tool_use":
             return _validate(dict(block.input), schema, tools_name)
@@ -222,24 +263,41 @@ def _openai_call(route: _Route, system: str, user: str, schema: dict,
             "`pip install 'veto-agents[media]'` (or `pip install openai`)."
         ) from e
 
+    # Import the SDK's base error type so a present-but-unusable key surfaces as
+    # a clean StructuredLLMError, not a raw ~30-line traceback. Lazily, so a
+    # missing/old SDK never breaks import — fall back to Exception if absent.
+    try:
+        from openai import OpenAIError
+    except ImportError:  # pragma: no cover - very old SDK
+        OpenAIError = Exception  # type: ignore[assignment,misc]
+
     client = OpenAI(api_key=route.api_key, base_url=route.base_url)
-    resp = client.chat.completions.create(
-        model=route.model,
-        max_tokens=max_tokens,
-        messages=[
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ],
-        tools=[{
-            "type": "function",
-            "function": {
-                "name": tools_name,
-                "description": "Return the structured result.",
-                "parameters": schema,
-            },
-        }],
-        tool_choice={"type": "function", "function": {"name": tools_name}},
-    )
+    try:
+        resp = client.chat.completions.create(
+            model=route.model,
+            max_tokens=max_tokens,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            tools=[{
+                "type": "function",
+                "function": {
+                    "name": tools_name,
+                    "description": "Return the structured result.",
+                    "parameters": schema,
+                },
+            }],
+            tool_choice={"type": "function", "function": {"name": tools_name}},
+        )
+    except StructuredLLMError:
+        raise
+    except OpenAIError as e:
+        # Present-but-unusable key / API failure (401 invalid key, 400
+        # 'credit balance too low', 429 rate limit, connection). One-liner only.
+        raise StructuredLLMError(_concise_api_error("OpenAI", e)) from e
+    except Exception as e:  # noqa: BLE001 — any other SDK/client error, fail clean
+        raise StructuredLLMError(_concise_api_error("OpenAI", e)) from e
     choice = resp.choices[0]
     calls = getattr(choice.message, "tool_calls", None) or []
     if not calls:

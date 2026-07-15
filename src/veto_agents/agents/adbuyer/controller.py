@@ -75,6 +75,75 @@ ALLOWED_ACTIONS = {"adjust_budget", "pause", "resume", "refresh_creative"}
 DEFAULT_INTERVAL_MIN = 360
 
 
+# ─── local (unsigned) authorize stub — MOCK + not-signed-in only ──────────
+#
+# The "try it now, no account, no spend" promise: a `--mock` run with NO sign-in
+# (no api key) must still show the full governance DEMO. This stub stands in for
+# the real VetoClient ONLY on that path — it returns a permissive `allow` so the
+# loop keeps moving, but it clearly LABELS every verdict "(local — sign in for
+# signed Veto receipts)" and returns NO receipt_url/receipt_jwt (there is no
+# server, so there is nothing to sign). The CODE discipline gate (±20% clamp,
+# learning-hold, cooldown) runs UNCHANGED around it — that governance is local
+# and needs no server — so the demo still visibly HOLDs and clamps.
+#
+# HARD invariant: this stub is instantiated ONLY when BOTH mock is True AND there
+# is no api key. A real (non-mock) run always uses the real VetoClient; a
+# signed-in --mock run also uses the real VetoClient (free decision_only). See
+# _make_veto_client() for the single decision point.
+
+
+class _LocalAllowResult:
+    """Mimics veto_client.AuthorizeResult's shape for the offline demo verdict.
+
+    Same attributes govern_and_execute/_show_verdict read: verdict, reason_codes,
+    receipt_url, receipt_jwt. No receipt_url — an unsigned local allow has no
+    server-issued proof, and we must never fabricate one that would fail
+    veto_verify_receipt."""
+
+    __slots__ = ("verdict", "reason_codes", "receipt_url", "receipt_jwt",
+                 "raw", "safe_signature", "safe_signer")
+
+    def __init__(self) -> None:
+        self.verdict = "allow"
+        self.reason_codes = ["local_demo_no_signin"]
+        self.receipt_url = None
+        self.receipt_jwt = None
+        self.raw = {"local": True}
+        self.safe_signature = None
+        self.safe_signer = None
+
+
+class _LocalAllowStub:
+    """A drop-in for VetoClient used ONLY on the mock + not-signed-in demo path.
+
+    `.authorize(...)` always returns a permissive local `allow` (no server call,
+    no receipt). The surrounding CODE discipline gate still runs, so the demo
+    exercises the full ±20% clamp / learning-hold / cooldown governance — only
+    the *signed* Veto verdict is stubbed out until the user signs in.
+    """
+
+    def authorize(self, **kwargs: Any) -> _LocalAllowResult:  # noqa: ARG002
+        return _LocalAllowResult()
+
+    def close(self) -> None:
+        pass
+
+
+def _make_veto_client(cfg, *, mock: bool):
+    """The SINGLE place that decides real VetoClient vs the local demo stub.
+
+    Returns (client, using_stub). The local stub is used if and ONLY if BOTH:
+      • mock is True (mimicked Meta — there is no real spend), AND
+      • the user is not signed in (no api key).
+    Any real (non-mock) run — and any signed-in run — gets the real VetoClient,
+    so a genuine spend can NEVER be governed by the permissive stub.
+    """
+    signed_in = bool(getattr(cfg, "api_key", None))
+    if mock and not signed_in:
+        return _LocalAllowStub(), True
+    return VetoClient(api_base=cfg.veto_api_base, api_key=cfg.api_key), False
+
+
 # ─── ad-ops discipline ("patience") config + state ────────────────────────
 
 
@@ -100,7 +169,17 @@ def _as_bool(v: Any, default: bool) -> bool:
     if isinstance(v, bool):
         return v
     if isinstance(v, str):
-        return v.strip().lower() in ("1", "true", "yes", "on")
+        s = v.strip().lower()
+        if s in ("1", "true", "yes", "on"):
+            return True
+        if s in ("0", "false", "no", "off"):
+            return False
+        # Unrecognized string (e.g. a typo'd `respect_learning_phase: mabye`) →
+        # return the caller's DEFAULT, matching _as_float/_as_int. Do NOT fall
+        # through to False: for a fail-safe flag like respect_learning_phase the
+        # default is True, and silently disabling the learning gate on a typo
+        # would be fail-open in the wrong direction.
+        return default
     if isinstance(v, (int, float)):
         return bool(v)
     return default
@@ -496,7 +575,10 @@ def _validate_action(raw: dict, state: dict) -> Action | None:
             new_budget = float(raw.get("new_budget_usd"))
         except (TypeError, ValueError):
             return None
-        if new_budget <= 0:
+        # Reject non-finite amounts (nan/inf) up front: nan fails EVERY comparison
+        # (so `<= 0` would let it slip through) and inf would defeat the magnitude
+        # cap — neither may ever reach client.authorize or a Meta write.
+        if not math.isfinite(new_budget) or new_budget <= 0:
             return None
         return Action(
             type="adjust_budget",
@@ -929,6 +1011,14 @@ def _apply_magnitude_cap(
     without a base the +/-% band is undefined, and letting an unbounded change
     through would defeat the whole magnitude discipline. HOLD is the safe default.
     Non-budget actions always return True.
+
+    NOTE on ceilings (re: M-2): the declared policy caps (adbuyer.yaml
+    `caps.per_day_usd`, per-tx, etc.) are enforced SERVER-SIDE by Veto authorize
+    on the absolute amount. This ±max_budget_change_pct clamp is a SEPARATE,
+    LOCAL, per-step RATE ceiling on the *change* relative to the current budget —
+    it is the tighter, real per-cycle ceiling for a budget move. The two are
+    independent and both apply: a change can clear this ±% clamp yet still be
+    denied by the server dollar cap (and vice-versa). Neither replaces the other.
     """
     if action.type != "adjust_budget":
         return True
@@ -937,6 +1027,11 @@ def _apply_magnitude_cap(
     if not old or old <= 0 or proposed is None:
         # No known current budget → the +/-% band is undefined. Never authorize
         # or write an unclamped budget change; signal the caller to HOLD.
+        return False
+    # Defense-in-depth: a non-finite base or proposal (nan/inf — nan slips past
+    # every `<=`/`>=` comparison, inf explodes the band) must NEVER be clamped
+    # into a real amount and handed to authorize/Meta. HOLD instead.
+    if not (math.isfinite(old) and math.isfinite(proposed)):
         return False
     pct = max(0.0, adops.max_budget_change_pct) / 100.0
     lo = old * (1.0 - pct)
@@ -994,13 +1089,27 @@ class ActionOutcome:
 
 def _show_verdict(res, console: Console, *, label: str) -> None:
     """Print the Veto verdict + receipt URL. Governance is shown on the GOOD path
-    too: an allow prints a clear green line, not just deny/escalate — so a demo
-    viewer sees Veto approving every autonomous spend, not only blocking."""
-    if res.receipt_url:
-        console.print(f"    [dim]receipt: {res.receipt_url}[/dim]")
+    too: an ALLOW carries its signed receipt just like a deny/escalate does — a
+    governed spend always surfaces its receipt when the server returns one, so a
+    demo viewer sees Veto approving (with proof) every autonomous spend, not only
+    blocking. The URL is shown, never the 2KB JWT."""
     if res.verdict == "allow":
-        console.print("    [green]Veto: allowed ✓[/green]")
+        # The receipt rides WITH the allowed line so the ALLOW render is never a
+        # bare "allowed" with the proof detached (or missing).
+        if res.receipt_url:
+            console.print(f"    [green]Veto: allowed ✓[/green] · [dim]receipt: {res.receipt_url}[/dim]")
+        elif "local_demo_no_signin" in (res.reason_codes or []):
+            # The mock + not-signed-in demo stub: there is no server, so no signed
+            # receipt. Say so plainly — the discipline gate still governed this.
+            console.print(
+                "    [green]Veto: allowed ✓[/green] "
+                "[dim](local — sign in for signed Veto receipts)[/dim]"
+            )
+        else:
+            console.print("    [green]Veto: allowed ✓[/green] [dim](no receipt returned)[/dim]")
     else:
+        if res.receipt_url:
+            console.print(f"    [dim]receipt: {res.receipt_url}[/dim]")
         codes = ", ".join(res.reason_codes) if res.reason_codes else "(no reason codes)"
         console.print(f"    [red]x {label}: {res.verdict}[/red] · {codes}")
 
@@ -1327,17 +1436,49 @@ def _json_obj(obj: dict) -> str:
 def _preflight(cfg, console: Console, *, mock: bool = False) -> tuple[Any, dict] | None:
     """Sign-in + Meta-creds pre-flight. Returns (cfg, meta) or None to abort.
 
-    Sign-in is ALWAYS required (mock mode still calls REAL Veto authorize —
-    decision_only, free — so the mimicked demo exercises real governance). Only
-    the Meta-credentials requirement is skipped when `mock`: there is no real
+    Sign-in policy:
+      • real (non-mock) run — ALWAYS required. Without it there is no signed
+        Veto governance, so we abort (return None).
+      • --mock run — OFFERED but NOT required. This is the "try it now, no
+        account, no spend" promise: if the user declines sign-in we still run the
+        full mimicked demo, governed by a LOCAL permissive authorize stub (see
+        _make_veto_client) with the CODE discipline gate fully intact. Signed-in
+        --mock instead uses the REAL VetoClient (free decision_only) for signed
+        receipts. Either way the mock run never touches a real Meta account.
+
+    Only the Meta-credentials requirement is skipped when `mock`: there is no real
     Meta account, so we hand back a synthetic account id for the mimicked world.
     """
     if not (cfg.api_key and cfg.agent_id):
         from ...auth_gate import require_signin
 
-        cfg = require_signin(console, cfg)
+        try:
+            cfg = require_signin(console, cfg)
+        except EOFError:
+            # Non-TTY / piped input (e.g. `adbuyer --mock --once </dev/null`):
+            # the sign-in Confirm prompt has no input. In mock mode this must NOT
+            # dead-end the try-it demo — treat it as "declined, run on the local
+            # stub" (M-6). A real run still needs sign-in, so fall through to the
+            # abort below with the unchanged (signed-out) cfg.
+            if not mock:
+                console.print(
+                    "  [yellow]·[/yellow] Sign-in needed for a live run, but no "
+                    "input is available (piped / non-interactive). Re-run "
+                    "interactively, or try [cyan]--mock[/cyan] (no account, no spend)."
+                )
+                return None
         if not (cfg.api_key and cfg.agent_id):
-            return None
+            if not mock:
+                # Real run with no sign-in → no governance possible → abort.
+                return None
+            # --mock without sign-in → keep going on the LOCAL stub (the demo
+            # still runs the full discipline gate). Make the tradeoff explicit.
+            console.print(
+                "  [dim]Running the mock demo locally — the ±20% clamp, "
+                "learning-hold and cooldown discipline all run, but Veto "
+                "verdicts are LOCAL (no signed receipts). "
+                "Sign in for signed Veto receipts.[/dim]"
+            )
 
     if mock:
         from .tools.mock_meta import DEFAULT_ACCOUNT_ID
@@ -1551,14 +1692,28 @@ def run_loop(
         effective_interval = adops.observe_interval_minutes
         interval_src = "policy ad_ops.observe_interval_minutes"
 
+    # Real VetoClient vs the local unsigned demo stub — decided in ONE place, so
+    # a genuine (non-mock) spend can never be governed by the permissive stub.
+    client, using_local_stub = _make_veto_client(cfg, mock=mock)
+
     console.print("\n[bold cyan]Veto Agents — adbuyer autonomous loop[/bold cyan]")
     if mock:
-        console.print(
-            "  [magenta]MOCK:[/magenta]     mimicking Meta offline — NO real account, "
-            "NO real spend. Real Veto + discipline gates still run on every action."
-        )
+        if using_local_stub:
+            console.print(
+                "  [magenta]MOCK:[/magenta]     mimicking Meta offline — NO real account, "
+                "NO real spend. The ±20% clamp / learning-hold / cooldown discipline "
+                "still run; Veto verdicts are LOCAL (sign in for signed receipts)."
+            )
+        else:
+            console.print(
+                "  [magenta]MOCK:[/magenta]     mimicking Meta offline — NO real account, "
+                "NO real spend. Real Veto + discipline gates still run on every action."
+            )
     console.print(f"  [dim]goal:[/dim]      {goal}")
-    console.print(f"  [dim]agent_id:[/dim]  {cfg.agent_id}")
+    console.print(
+        f"  [dim]agent_id:[/dim]  "
+        f"{cfg.agent_id or '(not signed in — local demo)'}"
+    )
     console.print(f"  [dim]account:[/dim]   {meta.get('ad_account_id')}")
     console.print(
         f"  [dim]brain:[/dim]     {'heuristic (pure rules, no LLM)' if use_heuristic else 'LLM decide()'}"
@@ -1583,7 +1738,8 @@ def run_loop(
         "Ctrl-C to stop.[/dim]"
     )
 
-    client = VetoClient(api_base=cfg.veto_api_base, api_key=cfg.api_key)
+    # `client` was resolved above (_make_veto_client): real VetoClient, or the
+    # local unsigned stub ONLY on the mock + not-signed-in demo path.
     # In mock mode build the mimic client ONCE and reuse it — it carries the
     # evolving world (accumulating insights + budget/status mutations) that the
     # real, stateless HTTP client wouldn't need to.

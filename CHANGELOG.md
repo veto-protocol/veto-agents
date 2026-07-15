@@ -82,3 +82,29 @@ dollar moves**, and a code-enforced ad-ops discipline gate bounds the downside.
 ### Notes
 - Live-verified end to end against real Meta (reads, PAUSED writes, full
   dry-run autonomous cycle) and 900 simulated days of adversarial scenarios.
+
+## [0.0.28] — 2026-07-15
+Hardening pass to professional MCP/CLI standard (adversarial-QA driven).
+### Fixed (money-safety & robustness)
+- `--image-provider` is now enum-locked to {openai, fal} in the CLI **and** the
+  MCP schema — a typo/empty value can no longer silently spend on paid OpenAI
+  (it's rejected or falls back to free fal).
+- No raw tracebacks on common paths: a bad/expired LLM key, a malformed config,
+  or any unexpected error now yields a clean one-line message + exit 1 (new
+  top-level `_SafeTyper` safety net; wrapped provider calls; fail-soft config).
+- Budget validation: negative / zero / inf / nan / absurd caps rejected or
+  clamped; the displayed cap now equals what's enforced.
+- `--mock` runs for signed-out users (local governance demo) instead of
+  dead-ending on a sign-in prompt; non-TTY no longer prints a bare "Aborted."
+- Veto `receipt_url` captured/shown on the ALLOW path (studio + loop), not only
+  on deny. fal image errors now give an actionable "wallet setup" message with a
+  Veto line, never a raw x402 scheme error.
+- `brand set` no longer reads extension-less files (exfil surface closed).
+- MCP tools return structured, secret-redacted errors and report the package
+  version. Added `click>=8.0` as an explicit dependency.
+### Added
+- Optional, skippable **video (Higgsfield)** + **voice (ElevenLabs)** steps in
+  `adbuyer-setup`, saved to `~/.veto/creative.env` (0600); `creds set/list` for
+  adding provider keys later (presence-only listing, never prints secrets).
+- Higgsfield video provider rewritten to the real Cloud API (image→video job-set
+  poll) — verified live end-to-end.

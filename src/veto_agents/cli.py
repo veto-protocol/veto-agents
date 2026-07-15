@@ -23,8 +23,10 @@ import os
 import shutil
 import subprocess
 import sys
+from enum import Enum
 from typing import Optional
 
+import click
 import typer
 import yaml
 from rich.console import Console
@@ -51,6 +53,21 @@ def _mask_key(key: str) -> str:
     return f"{key[:12]}…{key[-4:]}"
 
 
+def _installed_agents(cfg) -> list[str]:
+    """Coerce cfg.installed_agents to a list of names (L-5).
+
+    A hand-edited or migrated config can hold a bare string ("media") instead
+    of a list. Iterating that yields characters ('m','e','d',…) → the
+    'm · e · d · i · a' bug, and `"x" in "media"` becomes a substring test.
+    Normalize once here so every consumer sees a clean list."""
+    v = getattr(cfg, "installed_agents", None)
+    if isinstance(v, str):
+        return [v] if v else []
+    if not v:
+        return []
+    return list(v)
+
+
 def _try_it_command(cfg) -> str:
     """A concrete, copy-pasteable command for the user to run after sign-in.
     Picks the first installed agent and pairs it with a sensible example
@@ -64,7 +81,7 @@ def _try_it_command(cfg) -> str:
         "inbox":    'veto-agents inbox "summarize my last 24 hours of email"',
         "build":    'veto-agents build "scaffold a Vite + React + Tailwind landing page"',
     }
-    for name in (cfg.installed_agents or []):
+    for name in _installed_agents(cfg):
         if name in examples:
             return examples[name]
     return "veto-agents"
@@ -89,7 +106,77 @@ def _render_signed_in(console: Console, cfg, *, try_it: str | None = None) -> No
     console.print(f"\n  [bold]Try it:[/bold]  [cyan]{cmd}[/cyan]\n")
 
 
-app = typer.Typer(
+console = Console()
+
+
+class _SafeTyper(typer.Typer):
+    """Typer app with a top-level safety net around the whole invocation.
+
+    The professional bar: no raw traceback — and no bare "Aborted." — ever
+    reaches a user on a common path. Always a clean one-line message + exit 1.
+
+    We drive Click ourselves with ``standalone_mode=False`` so aborts, usage
+    errors, and Click exceptions come back as *exceptions* (instead of Click's
+    default "print + sys.exit") — then we format them. Normal control flow is
+    preserved: ``typer.Exit`` / ``SystemExit`` pass through, ``--help`` and
+    usage errors still print and exit as usual, and a successful command
+    returns normally.
+    """
+
+    def __call__(self, *args, **kwargs):  # noqa: D401 - see class docstring
+        from typer.main import get_command
+
+        # Route through --help / completion? Let Typer's own machinery handle
+        # those exactly as before (they rely on standalone behavior + hooks).
+        if args or kwargs:
+            return super().__call__(*args, **kwargs)
+
+        command = get_command(self)
+        try:
+            # standalone_mode=False → Click/Typer RAISE ClickException/Abort
+            # (so our net formats them) but for an explicit exit they RETURN
+            # the exit code instead of raising (see typer.core.main). So the
+            # return value IS the exit code: 0/None on success, n on
+            # `raise typer.Exit(n)` / `--help` / `ctx.exit(n)`.
+            code = command(standalone_mode=False)
+            raise SystemExit(code or 0)
+        except SystemExit:
+            raise
+        except (typer.Exit, click.exceptions.Exit) as e:
+            # Belt-and-suspenders: if a future Typer version raises instead of
+            # returning, honor the intended exit code rather than tracebacking.
+            raise SystemExit(getattr(e, "exit_code", 0))
+        except click.exceptions.Abort:
+            # A prompt hit EOF/non-TTY, or Ctrl-C at a prompt. This is the old
+            # bare "Aborted." — replace with an actionable hint.
+            console.print(
+                "\n[yellow]·[/yellow] Cancelled — no input available "
+                "(piped or non-interactive), or interrupted. Re-run "
+                "interactively, or pass the flags you need "
+                "([cyan]veto-agents <command> --help[/cyan])."
+            )
+            raise SystemExit(1)
+        except KeyboardInterrupt:
+            console.print("\n[yellow]·[/yellow] Interrupted.")
+            raise SystemExit(130)
+        except EOFError:
+            console.print(
+                "\n[yellow]·[/yellow] No input available "
+                "(piped or non-interactive). Re-run interactively, or pass the "
+                "flags you need ([cyan]veto-agents <command> --help[/cyan])."
+            )
+            raise SystemExit(1)
+        except click.ClickException as e:
+            # Usage errors, bad params, etc. Click formats these nicely itself.
+            e.show()
+            raise SystemExit(e.exit_code)
+        except Exception as e:  # noqa: BLE001 - last-resort net, message not trace
+            msg = str(e).strip() or e.__class__.__name__
+            console.print(f"[red]✗[/red] {msg}  [dim](run with --help)[/dim]")
+            raise SystemExit(1)
+
+
+app = _SafeTyper(
     name="veto-agents",
     help="AI agents that pay for things on your behalf, with the safety built in.",
     no_args_is_help=False,  # callback handles bare-invocation (wizard or status)
@@ -109,9 +196,6 @@ brand_app = typer.Typer(help="Brand profile the creative studio and ad buyer fol
 app.add_typer(brand_app, name="brand")
 
 
-console = Console()
-
-
 # ─── version + meta ──────────────────────────────────────────────────────
 
 
@@ -126,7 +210,7 @@ def _root(
     if ctx.invoked_subcommand is None:
         cfg = cfg_module.load()
         # First run with no agents installed → wizard. Subsequent runs → status.
-        if not cfg.installed_agents:
+        if not _installed_agents(cfg):
             _first_run_wizard(ctx)
         else:
             _render_status(cfg)
@@ -179,7 +263,7 @@ def _render_status(cfg) -> None:
     except Exception:
         pass
 
-    other = [a for a in cfg.installed_agents if a != "adbuyer"]
+    other = [a for a in _installed_agents(cfg) if a != "adbuyer"]
     status = Table(show_header=False, box=None, pad_edge=False, padding=(0, 2))
     status.add_column("k", style="dim", no_wrap=True)
     status.add_column("v")
@@ -466,8 +550,7 @@ def setup() -> None:
         if model:
             cfg.llm_model = model
     else:
-        cfg.llm_endpoint = chosen.endpoint
-        cfg.llm_model = chosen.default_model
+        _apply_provider_endpoint(cfg, chosen)  # H-4: llm_endpoint only for keyless-local
         if chosen.notes:
             console.print(f"  [dim]{chosen.notes}[/dim]")
 
@@ -569,6 +652,110 @@ def _env_truthy(name: str) -> bool:
     return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on")
 
 
+# ── Image provider (H-1) ──────────────────────────────────────────────────
+# Canonical set. An unknown/empty --image-provider must NEVER silently reach
+# the PAID openai path (studio._do_image sends anything != "fal" to OpenAI),
+# so we constrain it at the CLI boundary. studio.py enforces server-side too.
+IMAGE_PROVIDERS = ("openai", "fal")
+
+
+class _ImageProvider(str, Enum):
+    openai = "openai"
+    fal = "fal"
+
+
+# ── LLM endpoint persistence (H-4) ────────────────────────────────────────
+# structured_llm._select treats a provider with NO env_var (ollama / custom)
+# as "keyless-local" and, crucially, falls back to a keyless-local route
+# whenever cfg.llm_endpoint is set — even for a HOSTED provider whose key is
+# missing. That swallows the friendly NoLLMKeyError and lets a placeholder key
+# hit the real hosted endpoint → a raw 401. So: only persist llm_endpoint for
+# keyless-local providers; leave it UNSET for hosted ones so the guard fires.
+def _provider_is_keyless_local(provider) -> bool:
+    """A provider is keyless-local (ollama / custom / self-hosted) exactly when
+    it declares no API-key env_var — the same test structured_llm._select uses.
+    Hosted providers (claude/openai/grok/…) all declare an env_var."""
+    return getattr(provider, "env_var", None) is None
+
+
+def _apply_provider_endpoint(cfg, provider) -> None:
+    """Persist endpoint/model for the chosen non-custom provider. Writes
+    llm_endpoint ONLY for keyless-local providers (H-4) so a hosted provider
+    with a missing key raises the friendly NoLLMKeyError instead of a raw 401.
+    Always sets the model (needed to route/label regardless of provider)."""
+    if _provider_is_keyless_local(provider):
+        cfg.llm_endpoint = provider.endpoint
+    else:
+        # Hosted: never pin an endpoint. The SDK uses its own default base URL,
+        # and leaving this UNSET is what lets the missing-key guard fire.
+        cfg.llm_endpoint = None
+    cfg.llm_model = provider.default_model
+
+
+# ── Budget validation (H-5) ───────────────────────────────────────────────
+# Meta itself caps a single campaign daily budget well under this; a per-
+# generation creative cap is cents. Anything past these is a fat-finger, not
+# an intent — clamp + warn so the SUMMARY equals what's actually enforced.
+_MAX_DAILY_BUDGET_USD = 1_000_000.0
+_MAX_CREATIVE_CAP_USD = 10_000.0
+
+
+class _BudgetError(ValueError):
+    """A budget value is non-positive or non-finite — reject with a clear msg."""
+
+
+def _validate_budget(value, *, label: str, flag: str, max_usd: float) -> float:
+    """Validate + normalize a dollar cap before it's written to policy.
+
+    Rejects non-finite (inf/nan) and non-positive (<= 0) values — those either
+    corrupt the YAML (so the read-back regex silently returns the DEFAULT and
+    the summary lies) or disable the cap entirely. Clamps absurd-but-finite
+    values down to a sane ceiling so the displayed cap always equals what's
+    enforced. Returns the value that will actually be written."""
+    import math
+
+    try:
+        v = float(value)
+    except (TypeError, ValueError) as e:
+        raise _BudgetError(f"{label} must be a number ({flag}).") from e
+    if not math.isfinite(v):
+        raise _BudgetError(
+            f"{label} must be a finite dollar amount, not '{value}' ({flag})."
+        )
+    if v <= 0:
+        raise _BudgetError(
+            f"{label} must be greater than $0 (got {v:g}) — a $0 or negative cap "
+            f"would disable the guardrail ({flag})."
+        )
+    if v > max_usd:
+        console.print(
+            f"  [yellow]·[/yellow] {label} of ${v:,.2f} looks like a typo — "
+            f"clamping to ${max_usd:,.2f}. Edit later with "
+            f"[cyan]veto-agents policy edit adbuyer[/cyan]."
+        )
+        v = max_usd
+    return v
+
+
+def _prompt_budget(prompt: str, default: str, *, label: str, flag: str,
+                   max_usd: float, console: Console) -> float | None:
+    """Interactive budget prompt that re-asks on bad input instead of silently
+    dropping to the default (H-5). Enter keeps the current value; a
+    non-positive/non-finite/non-numeric entry warns and re-prompts. Returns the
+    validated float, or None on EOF (caller keeps the existing policy value)."""
+    while True:
+        try:
+            raw = Prompt.ask(prompt, default=default)
+        except EOFError:
+            return None
+        try:
+            return _validate_budget(float(raw), label=label, flag=flag, max_usd=max_usd)
+        except _BudgetError as e:
+            console.print(f"  [red]✗[/red] {e}")
+        except ValueError:
+            console.print(f"  [red]✗[/red] {label} must be a number (e.g. 25 or 0.25).")
+
+
 def _upsert_env_var(path, key: str, value: str) -> None:
     """Append-or-update KEY="VALUE" in a ~/.veto/*.env file without clobbering
     other keys or comments. Round-trips through the readers' _parse_env_file
@@ -626,15 +813,25 @@ def _read_policy_scalar(fname: str, key: str, default: float) -> float:
 def _patch_policy_caps(daily_budget, creative_cap, console: Console) -> None:
     """Write the daily ad budget into adbuyer.yaml (caps.per_day_usd) and the
     per-generation cap into adbuyer-creative.yaml (caps.per_transaction_usd).
-    Comment-preserving surgical edit; no-ops for values left as None."""
+    Comment-preserving surgical edit; no-ops for values left as None.
+
+    Each value is validated first (H-5): non-positive / non-finite are
+    rejected with a clear _BudgetError, absurd values are clamped + warned.
+    The value actually WRITTEN is the validated one, so the summary read-back
+    can never diverge from what's enforced (no inf/nan/leading-minus that the
+    read-back regex would silently drop back to the default)."""
     if daily_budget is not None:
+        daily_budget = _validate_budget(
+            daily_budget, label="Daily ad budget", flag="--daily-budget",
+            max_usd=_MAX_DAILY_BUDGET_USD,
+        )
         p = cfg_module.policies_dir() / "adbuyer.yaml"
         if p.exists():
-            txt, ok = _set_yaml_scalar(p.read_text(), "per_day_usd", float(daily_budget))
+            txt, ok = _set_yaml_scalar(p.read_text(), "per_day_usd", daily_budget)
             if ok:
                 p.write_text(txt)
                 console.print(
-                    f"  [green]✓[/green] Daily ad budget → [bold]${float(daily_budget):,.2f}/day[/bold]  [dim]{p.name}[/dim]"
+                    f"  [green]✓[/green] Daily ad budget → [bold]${daily_budget:,.2f}/day[/bold]  [dim]{p.name}[/dim]"
                 )
             else:
                 console.print(
@@ -644,13 +841,17 @@ def _patch_policy_caps(daily_budget, creative_cap, console: Console) -> None:
         else:
             console.print(f"  [yellow]·[/yellow] {p.name} not found — install adbuyer first.")
     if creative_cap is not None:
+        creative_cap = _validate_budget(
+            creative_cap, label="Per-creative cap", flag="--creative-cap",
+            max_usd=_MAX_CREATIVE_CAP_USD,
+        )
         p = cfg_module.policies_dir() / "adbuyer-creative.yaml"
         if p.exists():
-            txt, ok = _set_yaml_scalar(p.read_text(), "per_transaction_usd", float(creative_cap))
+            txt, ok = _set_yaml_scalar(p.read_text(), "per_transaction_usd", creative_cap)
             if ok:
                 p.write_text(txt)
                 console.print(
-                    f"  [green]✓[/green] Per-generation creative cap → [bold]${float(creative_cap):,.2f}[/bold]  [dim]{p.name}[/dim]"
+                    f"  [green]✓[/green] Per-generation creative cap → [bold]${creative_cap:,.2f}[/bold]  [dim]{p.name}[/dim]"
                 )
             else:
                 console.print(
@@ -660,9 +861,30 @@ def _patch_policy_caps(daily_budget, creative_cap, console: Console) -> None:
             console.print(f"  [yellow]·[/yellow] {p.name} not found — install adbuyer first.")
 
 
+def _ask_optional_secret(prompt: str) -> str:
+    """Password-masked, Enter-to-skip prompt that treats EOF/non-TTY as 'skip'
+    (returns "") instead of raising EOFError. For optional secret inputs so a
+    piped/non-TTY run never dead-ends on an optional field."""
+    try:
+        return Prompt.ask(prompt, default="", password=True).strip()
+    except EOFError:
+        return ""
+
+
+def _confirm_optional(prompt: str, console: Console, *, default: bool = False) -> bool:
+    """Yes/no for an OPTIONAL step. EOF/non-TTY → the default (never raises,
+    never a bare 'Aborted.'). Keeps optional onboarding steps skippable in
+    scripts and piped input."""
+    try:
+        return Confirm.ask(prompt, default=default)
+    except EOFError:
+        return default
+
+
 def _prompt_env_secret(key: str, label: str, url: str | None, path, console: Console) -> bool:
     """Interactive: explain, open the signup URL, prompt, write to a *.env file.
-    Returns True if a value was saved. Never prints the value."""
+    Returns True if a value was saved. Never prints the value. EOF/non-TTY is
+    treated as 'skip' (no traceback)."""
     console.print(f"  [bold]{label}[/bold]  [dim]{key}[/dim]")
     if url:
         console.print(f"  [dim]Get one:[/dim] [cyan]{url}[/cyan]")
@@ -672,7 +894,7 @@ def _prompt_env_secret(key: str, label: str, url: str | None, path, console: Con
             webbrowser.open(url)
         except Exception:
             pass
-    value = Prompt.ask(f"  Paste {key} (or Enter to skip)", default="", password=True).strip()
+    value = _ask_optional_secret(f"  Paste {key} (or Enter to skip)")
     if value:
         _upsert_env_var(path, key, value)
         console.print(f"  [green]✓[/green] Saved [bold]{key}[/bold] → [dim]~/.veto/{path.name}[/dim]")
@@ -681,20 +903,40 @@ def _prompt_env_secret(key: str, label: str, url: str | None, path, console: Con
     return False
 
 
+# The sensible hosted default when a provider is unknown/empty. Hosted (not a
+# keyless-local endpoint) so a first-run user with no local model still works;
+# a missing key then raises the friendly NoLLMKeyError, never a raw 401.
+_DEFAULT_LLM_PROVIDER = "claude"
+
+
+def _provider_or_default(name: str | None, console: Console):
+    """Resolve a provider name to an LLMProvider with ONE consistent policy
+    (M-5): a known name is honored; an empty/whitespace/unknown name warns once
+    and falls back to the sensible hosted default. Never silently maps an
+    unknown value to a different provider."""
+    key = (name or "").strip()
+    p = llm_providers.get(key) if key else None
+    if p is not None:
+        return p
+    shown = f"'{name}'" if name else "empty"
+    console.print(
+        f"  [yellow]·[/yellow] Unknown/blank LLM provider ({shown}) — "
+        f"defaulting to [cyan]{_DEFAULT_LLM_PROVIDER}[/cyan]. "
+        f"[dim]Choices: {', '.join(llm_providers.all_names())}.[/dim]"
+    )
+    return llm_providers.get(_DEFAULT_LLM_PROVIDER)
+
+
 def _choose_llm_provider(cfg, requested: str | None, non_interactive: bool, console: Console):
     """Return the chosen LLMProvider. Honors an explicit request (flag/env),
-    else prompts (interactive) or defaults to claude (non-interactive)."""
-    if requested:
-        p = llm_providers.get(requested)
-        if p is None:
-            console.print(
-                f"  [yellow]·[/yellow] Unknown provider '{requested}' — defaulting to [cyan]claude[/cyan]."
-            )
-            p = llm_providers.get("claude")
-        return p
+    else prompts (interactive) or defaults (non-interactive). Unknown/empty
+    values always warn + fall back to the same sensible hosted default (M-5)."""
+    if requested is not None:
+        # An explicit flag/env value was given — resolve it consistently.
+        return _provider_or_default(requested, console)
     if non_interactive:
-        name = cfg.llm_provider if cfg.llm_provider in llm_providers.PROVIDERS else "claude"
-        return llm_providers.get(name)
+        # No flag: fall back to the persisted choice, warning if it's unusable.
+        return _provider_or_default(getattr(cfg, "llm_provider", None), console)
 
     provider_list = list(llm_providers.PROVIDERS.values())
     tbl = Table(show_header=False, box=None, pad_edge=False, padding=(0, 2))
@@ -781,29 +1023,40 @@ def _collect_creative_keys(cfg, non_interactive: bool, console: Console) -> None
             console,
         )
 
+    # ── VIDEO (Higgsfield) + VOICE (ElevenLabs) — optional, only if you want
+    # video/voice ads. Each is Enter-to-skip; nothing here is required. Values
+    # go to ~/.veto/creative.env (0600, never echoed). Skipped cleanly if the
+    # user says no or hits EOF — the studio still makes copy + image without it.
+    console.print(
+        "  [dim]Video + voice are optional — only if you want video/voice ads. "
+        "Press Enter at any prompt to skip.[/dim]"
+    )
+
     # Higgsfield video (needs both halves, or a combined credential).
     if _cc.higgsfield_credentials(cfg):
         console.print("  [green]✓[/green] Higgsfield video already configured.")
-    elif Confirm.ask("  Add Higgsfield video keys? [dim](optional)[/dim]", default=False):
+    elif _confirm_optional("  Add Higgsfield VIDEO keys? [dim](optional)[/dim]", console):
         try:
             import webbrowser
 
             webbrowser.open("https://higgsfield.ai")
         except Exception:
             pass
-        kid = Prompt.ask("  HIGGSFIELD_API_KEY (or Enter to skip)", default="", password=True).strip()
-        ksec = Prompt.ask("  HIGGSFIELD_API_SECRET (or Enter to skip)", default="", password=True).strip()
+        kid = _ask_optional_secret("  HIGGSFIELD_API_KEY (or Enter to skip)")
+        ksec = _ask_optional_secret("  HIGGSFIELD_API_SECRET (or Enter to skip)")
         if kid:
             _upsert_env_var(_cc.CREATIVE_ENV_PATH, "HIGGSFIELD_API_KEY", kid)
             console.print("  [green]✓[/green] Saved [bold]HIGGSFIELD_API_KEY[/bold] → [dim]~/.veto/creative.env[/dim]")
         if ksec:
             _upsert_env_var(_cc.CREATIVE_ENV_PATH, "HIGGSFIELD_API_SECRET", ksec)
             console.print("  [green]✓[/green] Saved [bold]HIGGSFIELD_API_SECRET[/bold] → [dim]~/.veto/creative.env[/dim]")
+        if not (kid or ksec):
+            console.print("  [dim]Skipped video (optional).[/dim]")
 
     # ElevenLabs voice.
     if _cc.resolve("ELEVENLABS_API_KEY", cfg):
         console.print("  [green]✓[/green] ElevenLabs voice already configured.")
-    elif Confirm.ask("  Add an ElevenLabs voice key? [dim](optional)[/dim]", default=False):
+    elif _confirm_optional("  Add an ElevenLabs VOICE key? [dim](optional)[/dim]", console):
         _prompt_env_secret(
             "ELEVENLABS_API_KEY",
             "Voiceover (ElevenLabs)",
@@ -829,7 +1082,12 @@ def _collect_meta_keys(cfg, non_interactive: bool, console: Console) -> None:
     if all(m.values()):
         console.print("  [green]✓[/green] Meta already connected (token + ad account + page).")
         return
-    if not Confirm.ask("  Connect a Meta ad account now? [dim](or skip and use --mock)[/dim]", default=False):
+    # Optional step: EOF/non-TTY (piped setup) must SKIP, not dead-end the wizard
+    # right before the budget step. _confirm_optional treats EOF as the default (no).
+    if not _confirm_optional(
+        "  Connect a Meta ad account now? [dim](or skip and use --mock)[/dim]",
+        console,
+    ):
         console.print(
             "  [dim]Skipped — run with [/dim][cyan]--mock[/cyan][dim] anytime to try the full loop "
             "with no account, or re-run this setup later.[/dim]"
@@ -941,8 +1199,9 @@ def adbuyer_setup(
     Walks you through, one step at a time: sign in → pick a brain (LLM) →
     optional creative providers (image/video/voice) → optional Meta ad account
     → budget guardrails. Each step explains what it's for and where to get the
-    value, and writes to the right place (config, ~/.veto/creative.env,
-    ~/.veto/meta.env, policy caps) with 0600 perms. No secret is ever printed.
+    value, and writes to the right place: the secret .env files
+    (~/.veto/creative.env, ~/.veto/meta.env) are created 0600; non-secret
+    settings go to config.yaml and the policy caps. No secret is ever printed.
 
     Scriptable / non-interactive:
       veto-agents adbuyer-setup -n --llm-provider claude --daily-budget 25 --creative-cap 0.25
@@ -979,7 +1238,7 @@ def adbuyer_setup(
     cfg = cfg_module.load()
 
     # ── Step 0 — make sure the agent + its two policies are installed ──
-    if "adbuyer" not in cfg.installed_agents:
+    if "adbuyer" not in _installed_agents(cfg):
         console.print("\n[dim]Installing the adbuyer agent + its policies…[/dim]")
         ctx.invoke(install, name="adbuyer", skip_creds=True, no_banner=True)
         cfg = cfg_module.load()
@@ -1030,8 +1289,7 @@ def adbuyer_setup(
         if model:
             cfg.llm_model = model
     else:
-        cfg.llm_endpoint = provider.endpoint
-        cfg.llm_model = provider.default_model
+        _apply_provider_endpoint(cfg, provider)  # H-4: llm_endpoint only for keyless-local
     cfg_module.save(cfg)  # non-secret provider/endpoint/model → config.yaml
     console.print(
         f"  [green]✓[/green] Brain: [cyan]{cfg.llm_provider}[/cyan] · model "
@@ -1079,15 +1337,17 @@ def adbuyer_setup(
         db = daily_budget
         cc = creative_cap
         if db is None:
-            try:
-                db = float(Prompt.ask("  Daily ad budget (USD)", default=f"{cur_day:.0f}"))
-            except ValueError:
-                db = None
+            db = _prompt_budget(
+                "  Daily ad budget (USD)", f"{cur_day:.0f}",
+                label="Daily ad budget", flag="--daily-budget",
+                max_usd=_MAX_DAILY_BUDGET_USD, console=console,
+            )
         if cc is None:
-            try:
-                cc = float(Prompt.ask("  Max USD per creative generation", default=f"{cur_cap:.2f}"))
-            except ValueError:
-                cc = None
+            cc = _prompt_budget(
+                "  Max USD per creative generation", f"{cur_cap:.2f}",
+                label="Per-creative cap", flag="--creative-cap",
+                max_usd=_MAX_CREATIVE_CAP_USD, console=console,
+            )
         _patch_policy_caps(db, cc, console)
 
     # ── Wallet (optional handoff) ──
@@ -1097,7 +1357,9 @@ def adbuyer_setup(
             "  [dim]Funds the Veto-guarded Safe that pays for creative micro-spends (x402). "
             "Skip → decision-only until you fund it.[/dim]"
         )
-        if cfg_module.load().api_key and Confirm.ask("  Set up a funding wallet now?", default=False):
+        if cfg_module.load().api_key and _confirm_optional(
+            "  Set up a funding wallet now?", console
+        ):
             wallet_setup_module.run(console)
 
     # ── Finish ──
@@ -1111,7 +1373,7 @@ def adbuyer_setup(
 def list_cmd() -> None:
     """Show the catalog of installable agents."""
     cfg = cfg_module.load()
-    installed = set(cfg.installed_agents)
+    installed = set(_installed_agents(cfg))
 
     table = Table(show_header=True, header_style="bold cyan", box=None, pad_edge=False)
     table.add_column("Agent", style="bold", no_wrap=True)
@@ -1155,6 +1417,9 @@ def install(
         raise typer.Exit(1)
 
     cfg = cfg_module.load()
+    # Normalize once so a bare-string config can't cause a substring match on
+    # membership or a char-by-char append later (L-5).
+    cfg.installed_agents = _installed_agents(cfg)
 
     # NOTE: We deliberately DON'T require auth here. Franklin pattern —
     # install + use the agent locally first; receipt signing + on-chain
@@ -1389,34 +1654,87 @@ creds_app = typer.Typer(help="Manage saved tool credentials (Replicate, Vercel, 
 app.add_typer(creds_app, name="creds")
 
 
+# Keys that belong in a ~/.veto/*.env file (shared with the studio/meta
+# resolvers) rather than the veto-agents keychain. `creds set` routes these to
+# the right file so the add-later path lands exactly where setup writes them.
+def _env_file_for_key(env_var: str):
+    """Return the ~/.veto/*.env Path a creative/meta key should live in, or
+    None for a generic keychain credential."""
+    if env_var in _CREATIVE_ENV_KEYS:
+        from .agents.adbuyer.creative import creds as _cc
+        return _cc.CREATIVE_ENV_PATH
+    if env_var in _META_ENV_KEYS:
+        from .agents.adbuyer import meta_env as _me
+        return _me.META_ENV_PATH
+    return None
+
+
 @creds_app.command("list")
 def creds_list() -> None:
-    """Show which credentials are saved (masked)."""
+    """Show which credentials are saved — presence only, values never shown."""
+    printed = False
+
+    # ── Generic keychain credentials (masked, back-compat) ──
     saved = creds_module.load()
-    if not saved:
-        console.print("[dim]No credentials saved yet. Install an agent to set them up.[/dim]")
-        return
-    console.print("\n[bold]Saved credentials[/bold]\n")
-    for env_var, val in sorted(saved.items()):
-        mask = val[:6] + "…" + val[-4:] if len(val) > 12 else "***"
-        env_override = " [dim](overridden by shell env)[/dim]" if os.environ.get(env_var) else ""
-        console.print(f"  [cyan]{env_var:<24}[/cyan]  {mask}{env_override}")
+    if saved:
+        printed = True
+        console.print("\n[bold]Saved credentials[/bold]  [dim](keychain)[/dim]\n")
+        for env_var, val in sorted(saved.items()):
+            mask = val[:6] + "…" + val[-4:] if len(val) > 12 else "***"
+            env_override = " [dim](overridden by shell env)[/dim]" if os.environ.get(env_var) else ""
+            console.print(f"  [cyan]{env_var:<24}[/cyan]  {mask}{env_override}")
+
+    # ── Creative + Meta keys (presence only — never a value) ──
+    from .agents.adbuyer.creative import creds as _cc
+
+    def _present(env_var: str) -> bool:
+        return bool(_cc.resolve(env_var, None))
+
+    creative_rows = [
+        ("OPENAI_API_KEY", "image (gpt-image-1)"),
+        ("HIGGSFIELD_API_KEY", "video (Higgsfield)"),
+        ("HIGGSFIELD_API_SECRET", "video (Higgsfield)"),
+        ("ELEVENLABS_API_KEY", "voice (ElevenLabs)"),
+    ]
+    if any(_present(k) for k, _ in creative_rows) or not saved:
+        printed = True
+        console.print("\n[bold]Creative providers[/bold]  [dim](presence only)[/dim]\n")
+        for env_var, what in creative_rows:
+            mark = "[green]✓ set[/green]" if _present(env_var) else "[dim]— not set[/dim]"
+            console.print(f"  [cyan]{env_var:<24}[/cyan]  {mark}  [dim]{what}[/dim]")
+
+    if not printed:
+        console.print("[dim]No credentials saved yet. Install an agent or run "
+                      "[/dim][cyan]veto-agents adbuyer-setup[/cyan][dim] to set them up.[/dim]")
     console.print()
 
 
 @creds_app.command("set")
 def creds_set(
-    env_var: str = typer.Argument(..., help="The env var name, e.g. REPLICATE_API_TOKEN"),
-    value: str = typer.Argument(None, help="The value (omit to be prompted)"),
+    env_var: str = typer.Argument(..., help="The env var name, e.g. HIGGSFIELD_API_KEY"),
+    value: str = typer.Argument(None, help="The value (omit to be prompted; masked)"),
 ) -> None:
-    """Save or update a single credential."""
+    """Save or update a single credential (value never echoed).
+
+    Creative keys (OPENAI_API_KEY, HIGGSFIELD_API_KEY, HIGGSFIELD_API_SECRET,
+    ELEVENLABS_API_KEY) and Meta keys land in the ~/.veto/*.env file the agent
+    resolvers read; everything else goes to the veto-agents keychain."""
     if value is None:
-        value = Prompt.ask(f"Value for {env_var}", password=False).strip()
+        try:
+            value = Prompt.ask(f"Value for {env_var}", password=True).strip()
+        except EOFError:
+            console.print("[yellow]·[/yellow] No input. Nothing saved.")
+            raise typer.Exit(1)
     if not value:
         console.print("[yellow]·[/yellow] Empty value. Nothing saved.")
         return
-    creds_module.set_value(env_var, value)
-    console.print(f"[green]✓[/green] Saved [bold]{env_var}[/bold].")
+    env_path = _env_file_for_key(env_var)
+    if env_path is not None:
+        _upsert_env_var(env_path, env_var, value)
+        console.print(f"[green]✓[/green] Saved [bold]{env_var}[/bold] → [dim]~/.veto/{env_path.name}[/dim].")
+    else:
+        creds_module.set_value(env_var, value)
+        console.print(f"[green]✓[/green] Saved [bold]{env_var}[/bold].")
 
 
 @creds_app.command("remove")
@@ -1432,6 +1750,7 @@ def creds_remove(env_var: str = typer.Argument(...)) -> None:
 def uninstall(name: str = typer.Argument(...)) -> None:
     """Uninstall an agent."""
     cfg = cfg_module.load()
+    cfg.installed_agents = _installed_agents(cfg)  # coerce bare string → list (L-5)
     if name not in cfg.installed_agents:
         console.print(f"[yellow]·[/yellow] {name} is not installed.")
         return
@@ -1501,9 +1820,12 @@ def adbuyer(
       veto-agents adbuyer -g "grow signups, US, up to $30/day" --mock --once
     """
     cfg = cfg_module.load()
-    # --mock mimics Meta with no account, so the Meta-creds/entity setup a real
-    # run needs doesn't apply — but sign-in is still required (real Veto gate).
-    if not mock and "adbuyer" not in cfg.installed_agents:
+    # --mock mimics Meta with no account, no spend — the whole "no account, no
+    # spend" try-it promise. It must RUN for a signed-out / non-TTY user: we do
+    # NOT gate it on install or sign-in here (M-6). The controller runs it
+    # locally and handles the no-key authorize with a "sign in for signed
+    # receipts" note. A real (non-mock) run still needs the agent installed.
+    if not mock and "adbuyer" not in _installed_agents(cfg):
         console.print(
             "[red]✗[/red] [bold]adbuyer[/bold] is not installed. "
             "Run [cyan]veto-agents install adbuyer[/cyan] first."
@@ -1528,10 +1850,12 @@ def create(
     brief: str = typer.Argument(
         ..., help="Product/campaign brief to build a creative ad package from."
     ),
-    image_provider: str = typer.Option(
-        "openai", "--image-provider",
+    image_provider: _ImageProvider = typer.Option(
+        _ImageProvider.openai, "--image-provider",
+        case_sensitive=False,
         help="Hero image provider: 'openai' (BYO OPENAI_API_KEY) or 'fal' "
-             "(free x402). 'openai' falls back to 'fal' automatically if no key.",
+             "(free x402). 'openai' falls back to 'fal' automatically if no key. "
+             "A typo can't reach the paid path — only {openai, fal} are accepted.",
     ),
     video: Optional[bool] = typer.Option(
         None, "--video/--no-video",
@@ -1593,7 +1917,9 @@ def create(
         cfg,
         console,
         want=tuple(want),
-        image_provider=image_provider,
+        # .value → a plain "openai"/"fal" string; Typer already rejected any
+        # other value, so a typo can never reach studio's paid path (H-1).
+        image_provider=image_provider.value,
         out_root=_Path(out) if out else None,
     )
 
@@ -1985,7 +2311,9 @@ def _render_wallet_dashboard() -> None:
 def receipts() -> None:
     """List recent Veto-signed receipts for this user's agents."""
     console.print(
-        "[dim](receipts feed lands in v0.0.2 — for now, see veto-ai.com/receipts)[/dim]"
+        "[dim](local receipts feed is on the roadmap — for now, see "
+        "[/dim][cyan]veto-ai.com/receipts[/cyan][dim]. Signed-in? "
+        "[/dim][cyan]veto-agents wallet[/cyan][dim] shows recent authorizations.)[/dim]"
     )
 
 
@@ -2042,7 +2370,7 @@ def _bundled_subpolicy_path(subpkg: str):
 def _run_agent(name: str, prompt: str, *, yes: bool) -> None:
     """Run an installed agent against a prompt. Enforces plan-then-execute."""
     cfg = cfg_module.load()
-    if name not in cfg.installed_agents:
+    if name not in _installed_agents(cfg):
         console.print(
             f"[red]✗[/red] [bold]{name}[/bold] is not installed. "
             f"Run [cyan]veto-agents install {name}[/cyan] first."
