@@ -122,3 +122,13 @@ Hardening pass to professional MCP/CLI standard (adversarial-QA driven).
   where to get each key (Meta / Higgsfield Cloud / ElevenLabs / OpenAI), the
   wallet-vs-credit-card explanation, the local-only privacy model, and how to
   wire the MCP server into Claude Code / Claude Desktop.
+
+## [0.0.30] — 2026-07-15
+### Changed
+- The `adbuyer` loop / `--mock` demo output is now plain-English and readable:
+  named actions ("▲ Scaling up …" not "adjust_budget adset 238510…"), a `why:`
+  line, a clean per-ad-set snapshot, and a "Cycle recap: 2 applied, 1 held back
+  for discipline" summary. Dropped raw agent_id/account noise and the confusing
+  "(no receipt returned)".
+- All example commands with a `$amount` use single quotes so the shell doesn't
+  eat "$30" → "up to /day".
