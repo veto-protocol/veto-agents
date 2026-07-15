@@ -133,55 +133,72 @@ def _root(
 
 
 def _render_status(cfg) -> None:
-    """The default screen a returning user sees. Status of their setup +
-    1-3 next actions. Not a Typer help dump."""
-    banner.render(console, subtitle="AI agents that pay for things, governed by Veto")
+    """The default screen — the product's front door. Leads with what the tool
+    can DO (the flagship media buyer), then setup status, then a zero-setup try.
+    Not a Typer help dump."""
+    banner.render(console, subtitle="The autonomous AI media buyer that can't overspend")
 
-    installed = cfg.installed_agents
-    agents_line = " · ".join(f"[cyan]{a}[/cyan]" for a in installed)
+    # ── What you can do (flagship first) ──────────────────────────────────
+    cmds = Table(show_header=False, box=None, pad_edge=False, padding=(0, 2))
+    cmds.add_column("cmd", style="cyan", no_wrap=True)
+    cmds.add_column("what")
+    cmds.add_row("veto-agents adbuyer-setup", "guided setup — LLM brain · providers · Meta · budgets")
+    cmds.add_row('veto-agents brand set <url>', "teach it your brand from your website (or a txt/md)")
+    cmds.add_row('veto-agents create "<brief>"', "make an ad — copy + image (+ video/voice), Veto-gated")
+    cmds.add_row('veto-agents adbuyer -g "<goal>"', "run the 24/7 media buyer — add --mock to try safely")
+    cmds.add_row("veto-agents mcp", "use it from Claude Code / Claude Desktop / OpenClaw")
+    console.print(cmds)
 
-    # Account state
+    # ── Setup status ──────────────────────────────────────────────────────
     if cfg.api_key:
-        email_hint = "  [dim](veto-agents account)[/dim]"
-        account_line = f"[green]signed in[/green]{email_hint}"
+        account_line = "[green]signed in[/green]  [dim](veto-agents account)[/dim]"
     else:
-        account_line = "[yellow]local mode[/yellow]  [dim](upgrade: veto-agents account upgrade)[/dim]"
+        account_line = "[yellow]not signed in[/yellow]  [dim](veto-agents adbuyer-setup — free, 30s)[/dim]"
 
-    # Wallet state
     if cfg.wallet_address:
         short = cfg.wallet_address[:8] + "…" + cfg.wallet_address[-4:]
         wallet_line = f"[green]connected[/green] · {short}"
     else:
-        wallet_line = "[dim]not set yet  (veto-agents wallet setup)[/dim]"
+        wallet_line = "[dim]not set  (veto-agents wallet setup — optional)[/dim]"
 
-    table = Table(show_header=False, box=None, pad_edge=False, padding=(0, 2))
-    table.add_column("k", style="dim", no_wrap=True)
-    table.add_column("v")
-    table.add_row("Agents", agents_line or "[dim]none yet[/dim]")
-    table.add_row("Account", account_line)
-    table.add_row("Wallet", wallet_line)
-    console.print(table)
+    brand_line = "[dim]not set  (veto-agents brand set <url>)[/dim]"
+    try:  # fail-soft: status must never crash
+        from .agents.adbuyer.creative import brand as _brand
+        _p = _brand.load_brand()
+        if _p is not None:
+            brand_line = f"[green]{_p.name}[/green]  [dim]· {_p.tone}[/dim]"
+    except Exception:
+        pass
 
-    # Next-action suggestions — what an AI coding agent (or a human) can run now.
+    meta_line = "[dim]not connected  (ok — use --mock, or adbuyer-setup)[/dim]"
+    try:
+        from .agents.adbuyer import meta_env as _me
+        _m = _me.load_meta(cfg)
+        if not _me.missing(_m):
+            meta_line = "[green]connected[/green]"
+    except Exception:
+        pass
+
+    other = [a for a in cfg.installed_agents if a != "adbuyer"]
+    status = Table(show_header=False, box=None, pad_edge=False, padding=(0, 2))
+    status.add_column("k", style="dim", no_wrap=True)
+    status.add_column("v")
+    status.add_row("Account", account_line)
+    status.add_row("Brand", brand_line)
+    status.add_row("Meta ads", meta_line)
+    status.add_row("Wallet", wallet_line)
+    if other:
+        status.add_row("Also here", " · ".join(f"[cyan]{a}[/cyan]" for a in other)
+                       + "  [dim](sample agents)[/dim]")
     console.print()
-    console.print("[bold]Try:[/bold]")
-    example_for = installed[0] if installed else "media"
-    examples = {
-        "media": '"make a neon jellyfish in cyberpunk rain"',
-        "adbuyer": '"US traffic campaign to https://mysite.com, $20/day"',
-        "build": '"deploy this repo to the cheapest provider"',
-        "research": '"research the top 5 papers on agent governance"',
-        "inbox": '"triage my inbox from this week"',
-        "groups": '"--daemon  (run as a 24/7 Telegram bot)"',
-    }
-    example_prompt = examples.get(example_for, '"<your prompt>"')
-    console.print(f"  [cyan]veto-agents {example_for}[/cyan] {example_prompt}")
-    if not cfg.api_key:
-        console.print("  [cyan]veto-agents account upgrade[/cyan]  enable signed receipts")
-    if not cfg.wallet_address and cfg.api_key:
-        console.print("  [cyan]veto-agents wallet setup[/cyan]    enable on-chain spending governance")
+    console.print(status)
+
+    # ── Zero-setup try ────────────────────────────────────────────────────
+    console.print()
+    console.print("[bold]Try it now (no ad account, no spend — real governance):[/bold]")
+    console.print('  [cyan]veto-agents adbuyer -g "grow signups, US, up to $30/day" --mock --once[/cyan]')
     console.print(
-        f"\n[dim]All commands: [cyan]veto-agents --help[/cyan]  ·  version {__version__}[/dim]\n"
+        f"\n[dim]All commands + flags: [cyan]veto-agents --help[/cyan]  ·  docs: github.com/veto-protocol/veto-agents  ·  v{__version__}[/dim]\n"
     )
 
 
