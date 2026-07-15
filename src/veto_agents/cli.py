@@ -195,6 +195,52 @@ app.add_typer(wallet_app, name="wallet")
 brand_app = typer.Typer(help="Brand profile the creative studio and ad buyer follow.")
 app.add_typer(brand_app, name="brand")
 
+skill_app = typer.Typer(help="Install the Claude Skill so Claude can drive the media buyer.")
+app.add_typer(skill_app, name="skill")
+
+
+def _packaged_skill_dir():
+    """The bundled Claude Skill folder that ships inside the package."""
+    from pathlib import Path
+    return Path(__file__).resolve().parent / "skills" / "veto-media-buyer"
+
+
+@skill_app.command("path")
+def skill_path() -> None:
+    """Print the path to the bundled Claude Skill (point a host at it, or copy it)."""
+    console.print(str(_packaged_skill_dir()))
+
+
+@skill_app.command("install")
+def skill_install(
+    dest: str = typer.Option(
+        "~/.claude/skills", "--dir", "-d",
+        help="Skills directory to install into (default: ~/.claude/skills).",
+    ),
+) -> None:
+    """Copy the bundled Claude Skill into your Claude skills directory.
+
+    After this, open Claude and just ask in plain language ("make me an ad",
+    "run my media buyer") — Claude loads the skill and drives the CLI for you.
+    No MCP JSON config needed.
+    """
+    import shutil
+    from pathlib import Path
+
+    src = _packaged_skill_dir()
+    if not (src / "SKILL.md").exists():
+        console.print("[red]✗[/red] bundled skill not found in this install.")
+        raise typer.Exit(1)
+    target_root = Path(dest).expanduser()
+    target = target_root / "veto-media-buyer"
+    target_root.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(src, target, dirs_exist_ok=True)
+    console.print(f"  [green]✓[/green] Skill installed → [cyan]{target}[/cyan]")
+    console.print(
+        "  [dim]Open Claude and ask: [cyan]\"make me an ad\"[/cyan] or "
+        "[cyan]\"run my media buyer\"[/cyan] — it drives the CLI for you.[/dim]"
+    )
+
 
 # ─── version + meta ──────────────────────────────────────────────────────
 
