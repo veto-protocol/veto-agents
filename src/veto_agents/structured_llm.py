@@ -221,8 +221,10 @@ def _anthropic_call(route: _Route, system: str, user: str, schema: dict,
         import anthropic  # lazy — optional dep
     except ImportError as e:  # pragma: no cover - install hint
         raise StructuredLLMError(
-            "the `anthropic` SDK is not installed — run "
-            "`pip install 'veto-agents[media]'` (or `pip install anthropic`)."
+            "the `anthropic` SDK is not installed — reinstall with "
+            "`pipx install --force 'veto-agents[all]'` (pipx) or "
+            "`pip install --upgrade 'veto-agents[all]'` (venv). "
+            "If you used pipx, `pipx inject veto-agents anthropic` also works."
         ) from e
 
     client = anthropic.Anthropic(api_key=route.api_key)
@@ -259,8 +261,10 @@ def _openai_call(route: _Route, system: str, user: str, schema: dict,
         from openai import OpenAI  # lazy — optional dep
     except ImportError as e:  # pragma: no cover - install hint
         raise StructuredLLMError(
-            "the `openai` SDK is not installed — run "
-            "`pip install 'veto-agents[media]'` (or `pip install openai`)."
+            "the `openai` SDK is not installed — reinstall with "
+            "`pipx install --force 'veto-agents[all]'` (pipx) or "
+            "`pip install --upgrade 'veto-agents[all]'` (venv). "
+            "If you used pipx, `pipx inject veto-agents openai` also works."
         ) from e
 
     # Import the SDK's base error type so a present-but-unusable key surfaces as

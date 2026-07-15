@@ -108,3 +108,17 @@ Hardening pass to professional MCP/CLI standard (adversarial-QA driven).
   adding provider keys later (presence-only listing, never prints secrets).
 - Higgsfield video provider rewritten to the real Cloud API (image→video job-set
   poll) — verified live end-to-end.
+
+## [0.0.29] — 2026-07-15
+### Fixed
+- The LLM SDKs (`anthropic`, `openai`) are now CORE dependencies, not extras —
+  a bare `pip install veto-agents` no longer fails with "SDK not installed" on
+  the first `create`/`adbuyer`. The agent can't think without a brain, so the
+  brain ships by default. (`mcp` stays optional — only the `mcp` command needs it.)
+- The "SDK not installed" hint now points to the correct remedy
+  (`pipx install --force 'veto-agents[all]'` / `pipx inject`).
+### Added
+- docs/SETUP.md — from-experience credentials guide: what's required vs optional,
+  where to get each key (Meta / Higgsfield Cloud / ElevenLabs / OpenAI), the
+  wallet-vs-credit-card explanation, the local-only privacy model, and how to
+  wire the MCP server into Claude Code / Claude Desktop.
